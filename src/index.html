@@ -6,61 +6,116 @@
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="topbar">
+  <div class="mode-bar">
     <div class="brand">ReSync</div>
+    <div class="mode-switch">
+      <button id="modeRecordBtn" class="mode-btn active">Record</button>
+      <button id="modeLiveBtn" class="mode-btn">Live (experimental)</button>
+    </div>
+  </div>
 
-    <div class="session-controls">
-      <button id="chooseFolderBtn" class="btn">Choose Save Folder…</button>
-      <span id="folderLabel" class="folder-label">No folder chosen</span>
-      <input id="sessionName" class="session-name" placeholder="Session name (e.g. session-07)" />
+  <div id="recordModeRoot">
+    <header class="topbar">
+      <div class="session-controls">
+        <button id="chooseFolderBtn" class="btn">Choose Save Folder…</button>
+        <span id="folderLabel" class="folder-label">No folder chosen</span>
+        <input id="sessionName" class="session-name" placeholder="Session name (e.g. session-07)" />
+      </div>
+
+      <div class="transport">
+        <span id="statusLabel" class="status idle">IDLE</span>
+        <span id="timerLabel" class="timer">00:00:00</span>
+        <button id="armBtn" class="btn btn-record">Arm &amp; Record</button>
+        <button id="stopBtn" class="btn btn-stop" disabled>Stop</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="add-source">
+        <h2>Add Source</h2>
+        <div class="add-row">
+          <label>Video device</label>
+          <select id="videoDeviceSelect"></select>
+          <button id="addVideoBtn" class="btn">+ Add Camera</button>
+        </div>
+        <div class="add-row">
+          <label>Audio device</label>
+          <select id="audioDeviceSelect"></select>
+          <button id="addAudioBtn" class="btn">+ Add Mic</button>
+        </div>
+        <div class="add-row">
+          <label>Channels on selected audio device</label>
+          <span id="channelInfo" class="channel-info">–</span>
+          <button id="addAudioChannelsBtn" class="btn btn-secondary" disabled>
+            + Add Each Channel Separately (experimental)
+          </button>
+          <p class="hint">
+            Splits a multi-channel interface into one mono file per channel.
+            Whether Windows/Chromium actually exposes more than 2 channels
+            depends on your audio driver — if this only ever shows 2
+            channels, use "+ Add Mic" per device instead.
+          </p>
+        </div>
+        <button id="refreshDevicesBtn" class="btn btn-secondary">Refresh Device List</button>
+      </aside>
+
+      <section id="sourceGrid" class="source-grid">
+        <!-- source tiles get added here by renderer.js -->
+      </section>
+    </main>
+
+    <div id="countdownOverlay" class="countdown-overlay hidden">
+      <div id="countdownNumber" class="countdown-number">3</div>
+    </div>
+  </div>
+
+  <div id="liveModeRoot" class="hidden">
+    <div class="live-banner">
+      Live Mode is early and video-only right now — no audio mixing and no
+      streaming out yet. Cameras here are opened separately from Record
+      Mode; if a camera is already in use over there, opening it again
+      here may fail or take it over.
     </div>
 
-    <div class="transport">
-      <span id="statusLabel" class="status idle">IDLE</span>
-      <span id="timerLabel" class="timer">00:00:00</span>
-      <button id="armBtn" class="btn btn-record">Arm &amp; Record</button>
-      <button id="stopBtn" class="btn btn-stop" disabled>Stop</button>
+    <div class="live-layout">
+      <aside class="scene-panel">
+        <h2>Scenes</h2>
+        <div id="sceneList" class="scene-list"></div>
+        <button id="addSceneBtn" class="btn">+ Add Scene</button>
+      </aside>
+
+      <div class="monitors">
+        <div class="monitor-row">
+          <div class="monitor">
+            <div class="monitor-label">Preview</div>
+            <canvas id="previewCanvas" width="640" height="360"></canvas>
+          </div>
+          <div class="monitor monitor-program">
+            <div class="monitor-label monitor-label-live">Program (live)</div>
+            <canvas id="programCanvas" width="640" height="360"></canvas>
+          </div>
+        </div>
+
+        <div class="transition-controls">
+          <button id="cutBtn" class="btn">Cut</button>
+          <button id="fadeBtn" class="btn">Fade</button>
+        </div>
+
+        <div class="live-record-controls">
+          <button id="liveChooseFolderBtn" class="btn">Choose Save Folder…</button>
+          <span id="liveFolderLabel" class="folder-label">No folder chosen</span>
+          <span id="liveStatusLabel" class="status idle">IDLE</span>
+          <span id="liveTimerLabel" class="timer">00:00:00</span>
+          <button id="startProgramRecBtn" class="btn btn-record">Start Recording</button>
+          <button id="stopProgramRecBtn" class="btn btn-stop" disabled>Stop</button>
+        </div>
+      </div>
     </div>
-  </header>
 
-  <main class="layout">
-    <aside class="add-source">
-      <h2>Add Source</h2>
-      <div class="add-row">
-        <label>Video device</label>
-        <select id="videoDeviceSelect"></select>
-        <button id="addVideoBtn" class="btn">+ Add Camera</button>
-      </div>
-      <div class="add-row">
-        <label>Audio device</label>
-        <select id="audioDeviceSelect"></select>
-        <button id="addAudioBtn" class="btn">+ Add Mic</button>
-      </div>
-      <div class="add-row">
-        <label>Channels on selected audio device</label>
-        <span id="channelInfo" class="channel-info">–</span>
-        <button id="addAudioChannelsBtn" class="btn btn-secondary" disabled>
-          + Add Each Channel Separately (experimental)
-        </button>
-        <p class="hint">
-          Splits a multi-channel interface into one mono file per channel.
-          Whether Windows/Chromium actually exposes more than 2 channels
-          depends on your audio driver — if this only ever shows 2
-          channels, use "+ Add Mic" per device instead.
-        </p>
-      </div>
-      <button id="refreshDevicesBtn" class="btn btn-secondary">Refresh Device List</button>
-    </aside>
-
-    <section id="sourceGrid" class="source-grid">
-      <!-- source tiles get added here by renderer.js -->
-    </section>
-  </main>
-
-  <div id="countdownOverlay" class="countdown-overlay hidden">
-    <div id="countdownNumber" class="countdown-number">3</div>
+    <div id="offscreenVideos" class="offscreen-videos"></div>
   </div>
 
   <script src="renderer.js"></script>
+  <script src="live-renderer.js"></script>
 </body>
 </html>

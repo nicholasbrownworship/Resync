@@ -131,3 +131,31 @@ You can also trigger a build manually from the Actions tab
   8-channel interface) — the multi-channel caveat above is the biggest
   open question. Worth a short dry run, the same way you're already
   planning to soak-test the lav battery life.
+
+## Live Mode (experimental)
+
+A separate, opt-in mode alongside the default recorder above — modeled
+on OBS rather than on multitrack isolated recording. Switch to it with
+the **Live** button in the top bar.
+
+**What it does today (Phase 1):**
+- Named **scenes**, each holding one full-frame camera source.
+- A **Preview**/**Program** monitor pair — click a scene to load it
+  into Preview, then **Cut** (instant) or **Fade** (500ms crossfade)
+  to send it to Program.
+- **Start Recording** captures the Program canvas to its own file.
+
+**What it doesn't do yet:**
+- No audio mixing/bus — Program recordings are video-only. That's
+  Phase 3.
+- No live streaming (RTMP to YouTube/Twitch) — that's Phase 4, and the
+  one most likely to need real tuning once we're testing against
+  actual encode performance.
+- One source per scene, full-frame only — multi-source layouts and
+  picture-in-picture are Phase 2.
+
+**A real caveat to know before testing:** cameras are opened
+independently in Live Mode from however they're used in Record Mode.
+Most cameras only support one active consumer at a time, so opening
+the same physical camera in both modes at once may fail, or hand the
+device over to whichever mode asked for it most recently.
