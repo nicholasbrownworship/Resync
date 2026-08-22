@@ -1,0 +1,45 @@
+{
+  "name": "recsync",
+  "version": "0.1.0",
+  "description": "Synced multi-camera, multi-audio recorder. Arrange sources, hit record, get one separate file per source, all started and stopped together.",
+  "main": "main.js",
+  "author": "First Measure Studios",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nicholasbrownworship/recsync.git"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.firstmeasurestudios.recsync",
+    "productName": "RecSync",
+    "directories": {
+      "output": "release"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "nicholasbrownworship",
+      "repo": "recsync"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

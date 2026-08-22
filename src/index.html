@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>RecSync</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">RecSync</div>
+
+    <div class="session-controls">
+      <button id="chooseFolderBtn" class="btn">Choose Save Folder…</button>
+      <span id="folderLabel" class="folder-label">No folder chosen</span>
+      <input id="sessionName" class="session-name" placeholder="Session name (e.g. session-07)" />
+    </div>
+
+    <div class="transport">
+      <span id="statusLabel" class="status idle">IDLE</span>
+      <span id="timerLabel" class="timer">00:00:00</span>
+      <button id="armBtn" class="btn btn-record">Arm &amp; Record</button>
+      <button id="stopBtn" class="btn btn-stop" disabled>Stop</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="add-source">
+      <h2>Add Source</h2>
+      <div class="add-row">
+        <label>Video device</label>
+        <select id="videoDeviceSelect"></select>
+        <button id="addVideoBtn" class="btn">+ Add Camera</button>
+      </div>
+      <div class="add-row">
+        <label>Audio device</label>
+        <select id="audioDeviceSelect"></select>
+        <button id="addAudioBtn" class="btn">+ Add Mic</button>
+      </div>
+      <div class="add-row">
+        <label>Channels on selected audio device</label>
+        <span id="channelInfo" class="channel-info">–</span>
+        <button id="addAudioChannelsBtn" class="btn btn-secondary" disabled>
+          + Add Each Channel Separately (experimental)
+        </button>
+        <p class="hint">
+          Splits a multi-channel interface into one mono file per channel.
+          Whether Windows/Chromium actually exposes more than 2 channels
+          depends on your audio driver — if this only ever shows 2
+          channels, use "+ Add Mic" per device instead.
+        </p>
+      </div>
+      <button id="refreshDevicesBtn" class="btn btn-secondary">Refresh Device List</button>
+    </aside>
+
+    <section id="sourceGrid" class="source-grid">
+      <!-- source tiles get added here by renderer.js -->
+    </section>
+  </main>
+
+  <div id="countdownOverlay" class="countdown-overlay hidden">
+    <div id="countdownNumber" class="countdown-number">3</div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
