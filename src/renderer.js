@@ -1,9 +1,9 @@
-// RecSync renderer
-// -----------------
+// ReSync renderer
+// ----------------
 // Everything here runs in the Chromium renderer process. Device access
 // (getUserMedia), previews, metering, and MediaRecorder all happen here;
 // actual disk writes are delegated to the main process via the
-// `recsync` bridge exposed in preload.js, so long recordings stream to
+// `resync` bridge exposed in preload.js, so long recordings stream to
 // disk instead of piling up in renderer memory.
 
 const state = {
@@ -38,9 +38,9 @@ const el = {
 let idCounter = 0;
 const nextId = () => `src_${++idCounter}`;
 
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 // Device enumeration
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 
 async function unlockDeviceLabels() {
   // Device labels are blank until a permission has been granted at least
@@ -84,9 +84,9 @@ async function refreshDevices() {
     : '–';
 }
 
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 // Tile UI
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 
 function makeTile(source) {
   const tile = document.createElement('div');
@@ -167,9 +167,9 @@ function removeSource(id) {
   source.tileEl.remove();
 }
 
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 // Metering (audio sources only)
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 
 function attachMeter(source, streamForMeter) {
   const ctx = new AudioContext();
@@ -194,9 +194,9 @@ function attachMeter(source, streamForMeter) {
   tick();
 }
 
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 // Adding sources
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 
 async function addVideoSource() {
   const deviceId = el.videoDeviceSelect.value;
@@ -316,9 +316,9 @@ async function addAudioChannelsSeparately() {
   // channel tiles still reference it would kill their audio too.
 }
 
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 // Recording
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 
 function sanitizeFilename(name) {
   return name.replace(/[^a-z0-9\-_ ]/gi, '').trim().replace(/\s+/g, '_') || 'source';
@@ -341,7 +341,7 @@ async function beginSession() {
     return false;
   }
   const name = el.sessionName.value.trim() || `session-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-  state.sessionDir = await window.recsync.makeSessionFolder(state.baseDir, name);
+  state.sessionDir = await window.resync.makeSessionFolder(state.baseDir, name);
   return true;
 }
 
@@ -364,7 +364,7 @@ async function armAndRecord() {
     const mimeType = pickMimeType(source.kind);
     const ext = source.kind === 'video' ? 'webm' : 'webm';
     const filename = `${sanitizeFilename(source.label)}.${ext}`;
-    const fileId = await window.recsync.openFile(state.sessionDir, filename);
+    const fileId = await window.resync.openFile(state.sessionDir, filename);
 
     const recStream = source.kind === 'video'
       ? new MediaStream(source.stream.getVideoTracks())
@@ -374,7 +374,7 @@ async function armAndRecord() {
     recorder.ondataavailable = async (e) => {
       if (e.data && e.data.size > 0) {
         const buf = await e.data.arrayBuffer();
-        window.recsync.writeChunk(fileId, buf);
+        window.resync.writeChunk(fileId, buf);
       }
     };
 
@@ -404,7 +404,7 @@ async function armAndRecord() {
     });
   }
 
-  await window.recsync.writeJson(state.sessionDir, 'sync-log.json', syncLog);
+  await window.resync.writeJson(state.sessionDir, 'sync-log.json', syncLog);
 
   state.recording = true;
   state.recordStartWallClock = Date.now();
@@ -424,7 +424,7 @@ async function stopRecording() {
       return;
     }
     source.recorder.onstop = async () => {
-      await window.recsync.closeFile(source.fileId);
+      await window.resync.closeFile(source.fileId);
       source.tileEl.classList.remove('recording');
       resolve();
     };
@@ -442,9 +442,9 @@ async function stopRecording() {
   alert(`Saved to:\n${state.sessionDir}`);
 }
 
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 // Countdown / sync click
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 
 function beep() {
   const ctx = new AudioContext();
@@ -484,9 +484,9 @@ function runCountdown(seconds) {
   });
 }
 
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 // Timer
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 
 function startTimer() {
   state.timerInterval = setInterval(() => {
@@ -501,12 +501,12 @@ function stopTimer() {
   clearInterval(state.timerInterval);
 }
 
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 // Wiring
-// ---------------------------------------------------------------------
+// --------------------------------------------------------------------
 
 el.chooseFolderBtn.addEventListener('click', async () => {
-  const dir = await window.recsync.chooseFolder();
+  const dir = await window.resync.chooseFolder();
   if (dir) {
     state.baseDir = dir;
     el.folderLabel.textContent = dir;

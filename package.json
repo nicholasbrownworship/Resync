@@ -1,5 +1,5 @@
 {
-  "name": "recsync",
+  "name": "resync",
   "version": "0.1.0",
   "description": "Synced multi-camera, multi-audio recorder. Arrange sources, hit record, get one separate file per source, all started and stopped together.",
   "main": "main.js",
@@ -18,8 +18,8 @@
     "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.firstmeasurestudios.recsync",
-    "productName": "RecSync",
+    "appId": "com.firstmeasurestudios.resync",
+    "productName": "ReSync",
     "directories": {
       "output": "release"
     },

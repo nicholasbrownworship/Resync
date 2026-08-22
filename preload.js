@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('recsync', {
+contextBridge.exposeInMainWorld('resync', {
   chooseFolder: () => ipcRenderer.invoke('choose-folder'),
   makeSessionFolder: (baseDir, sessionName) =>
     ipcRenderer.invoke('make-session-folder', baseDir, sessionName),
