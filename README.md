@@ -18,6 +18,10 @@ broadcast tool.
   card, and each mic on your Focusrite/interface).
 - Each added source gets a tile with a live preview (video thumbnail or
   an audio level meter) and an editable label.
+- Each camera has its own **resolution** and **bitrate** dropdowns
+  right under its preview. Resolution requests are "ideal," not
+  "exact" — the tile shows what the device actually negotiated, since
+  it won't always match what you asked for.
 - **Arm & Record** runs a 3-2-1 countdown with a screen flash and an
   audible click, *then* starts every source's recorder in the same
   pass, and **Stop** stops them all together.

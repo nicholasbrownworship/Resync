@@ -221,6 +221,37 @@ select {
   transition: width 0.05s linear;
 }
 
+.quality-controls {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.quality-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.quality-row label {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.quality-row select {
+  font-size: 12px;
+  padding: 3px 6px;
+  flex: 1;
+  max-width: 170px;
+}
+.quality-actual {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 .tile-footer {
   display: flex;
   justify-content: space-between;

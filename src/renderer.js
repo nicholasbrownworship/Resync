@@ -38,6 +38,31 @@ const el = {
 let idCounter = 0;
 const nextId = () => `src_${++idCounter}`;
 
+// ---------------------------------------------------------------------
+// Video quality presets
+// ---------------------------------------------------------------------
+// Resolution is a capture-side constraint (renegotiated with the device
+// via getUserMedia), while bitrate is an encode-side setting applied
+// when MediaRecorder is created at record time. Both are "ideal", not
+// "exact" — the device may not support the requested resolution and
+// will fall back to its closest match, which is why each tile shows
+// what it actually negotiated.
+
+const RESOLUTION_PRESETS = {
+  'device-default': { label: 'Device default', constraints: {} },
+  '480p': { label: '480p', constraints: { width: { ideal: 854 }, height: { ideal: 480 } } },
+  '720p': { label: '720p', constraints: { width: { ideal: 1280 }, height: { ideal: 720 } } },
+  '1080p': { label: '1080p', constraints: { width: { ideal: 1920 }, height: { ideal: 1080 } } },
+  '4k': { label: '4K', constraints: { width: { ideal: 3840 }, height: { ideal: 2160 } } }
+};
+
+const BITRATE_PRESETS = {
+  standard: { label: 'Standard (2.5 Mbps)', bps: 2_500_000 },
+  good: { label: 'Good (5 Mbps)', bps: 5_000_000 },
+  high: { label: 'High (8 Mbps)', bps: 8_000_000 },
+  veryhigh: { label: 'Very High (16 Mbps)', bps: 16_000_000 }
+};
+
 // --------------------------------------------------------------------
 // Device enumeration
 // --------------------------------------------------------------------
@@ -119,6 +144,56 @@ function makeTile(source) {
     video.playsInline = true;
     video.srcObject = source.stream;
     tile.appendChild(video);
+    source.videoEl = video;
+
+    const quality = document.createElement('div');
+    quality.className = 'quality-controls';
+
+    const resRow = document.createElement('div');
+    resRow.className = 'quality-row';
+    const resLabel = document.createElement('label');
+    resLabel.textContent = 'Resolution';
+    const resSelect = document.createElement('select');
+    Object.entries(RESOLUTION_PRESETS).forEach(([key, { label }]) => {
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = label;
+      if (key === source.resolutionPreset) opt.selected = true;
+      resSelect.appendChild(opt);
+    });
+    resSelect.addEventListener('change', () => applyResolution(source, resSelect.value));
+    resRow.appendChild(resLabel);
+    resRow.appendChild(resSelect);
+    source.resSelectEl = resSelect;
+
+    const bitrateRow = document.createElement('div');
+    bitrateRow.className = 'quality-row';
+    const bitrateLabel = document.createElement('label');
+    bitrateLabel.textContent = 'Bitrate';
+    const bitrateSelect = document.createElement('select');
+    Object.entries(BITRATE_PRESETS).forEach(([key, { label }]) => {
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = label;
+      if (key === source.bitratePreset) opt.selected = true;
+      bitrateSelect.appendChild(opt);
+    });
+    bitrateSelect.addEventListener('change', () => {
+      source.bitratePreset = bitrateSelect.value;
+    });
+    bitrateRow.appendChild(bitrateLabel);
+    bitrateRow.appendChild(bitrateSelect);
+    source.bitrateSelectEl = bitrateSelect;
+
+    const actual = document.createElement('div');
+    actual.className = 'quality-actual';
+    quality.appendChild(resRow);
+    quality.appendChild(bitrateRow);
+    quality.appendChild(actual);
+    tile.appendChild(quality);
+    source.actualResEl = actual;
+
+    updateActualResolutionReadout(source);
   } else {
     const meter = document.createElement('div');
     meter.className = 'meter';
@@ -203,8 +278,9 @@ async function addVideoSource() {
   if (!deviceId) return;
   const label = el.videoDeviceSelect.options[el.videoDeviceSelect.selectedIndex].textContent;
 
+  const resolutionPreset = 'device-default';
   const stream = await navigator.mediaDevices.getUserMedia({
-    video: { deviceId: { exact: deviceId } },
+    video: { deviceId: { exact: deviceId }, ...RESOLUTION_PRESETS[resolutionPreset].constraints },
     audio: false
   });
 
@@ -213,10 +289,53 @@ async function addVideoSource() {
     kind: 'video',
     label,
     deviceId,
-    stream
+    stream,
+    resolutionPreset,
+    bitratePreset: 'high'
   };
   state.sources.push(source);
   makeTile(source);
+}
+
+function updateActualResolutionReadout(source) {
+  if (!source.actualResEl) return;
+  const track = source.stream.getVideoTracks()[0];
+  if (!track) {
+    source.actualResEl.textContent = 'No video track';
+    return;
+  }
+  const { width, height, frameRate } = track.getSettings();
+  const fpsText = frameRate ? ` @ ${Math.round(frameRate)}fps` : '';
+  source.actualResEl.textContent = width && height
+    ? `Actual: ${width}×${height}${fpsText}`
+    : 'Actual resolution unknown';
+}
+
+// Re-requests the camera stream with new resolution constraints. This is
+// a capture-side change (unlike bitrate), so it has to reopen the
+// device — the old stream's tracks are stopped and the preview/element
+// is repointed at the new one.
+async function applyResolution(source, presetKey) {
+  if (state.recording) {
+    alert('Stop recording before changing resolution.');
+    source.resSelectEl.value = source.resolutionPreset;
+    return;
+  }
+  const preset = RESOLUTION_PRESETS[presetKey];
+  try {
+    const newStream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: { exact: source.deviceId }, ...preset.constraints },
+      audio: false
+    });
+    source.stream.getTracks().forEach((t) => t.stop());
+    source.stream = newStream;
+    source.resolutionPreset = presetKey;
+    if (source.videoEl) source.videoEl.srcObject = newStream;
+    updateActualResolutionReadout(source);
+  } catch (err) {
+    alert(`Couldn't switch resolution: ${err.message}`);
+    source.resSelectEl.value = source.resolutionPreset;
+  }
 }
 
 async function addAudioSource(deviceId, label) {
@@ -320,6 +439,13 @@ async function addAudioChannelsSeparately() {
 // Recording
 // --------------------------------------------------------------------
 
+function setQualityControlsEnabled(enabled) {
+  state.sources.forEach((source) => {
+    if (source.resSelectEl) source.resSelectEl.disabled = !enabled;
+    if (source.bitrateSelectEl) source.bitrateSelectEl.disabled = !enabled;
+  });
+}
+
 function sanitizeFilename(name) {
   return name.replace(/[^a-z0-9\-_ ]/gi, '').trim().replace(/\s+/g, '_') || 'source';
 }
@@ -352,6 +478,7 @@ async function armAndRecord() {
   el.armBtn.disabled = true;
   el.statusLabel.textContent = 'ARMING';
   el.statusLabel.className = 'status arming';
+  setQualityControlsEnabled(false);
 
   await runCountdown(3);
 
@@ -370,7 +497,11 @@ async function armAndRecord() {
       ? new MediaStream(source.stream.getVideoTracks())
       : source.stream;
 
-    const recorder = new MediaRecorder(recStream, { mimeType });
+    const recorderOptions = { mimeType };
+    if (source.kind === 'video') {
+      recorderOptions.videoBitsPerSecond = BITRATE_PRESETS[source.bitratePreset].bps;
+    }
+    const recorder = new MediaRecorder(recStream, recorderOptions);
     recorder.ondataavailable = async (e) => {
       if (e.data && e.data.size > 0) {
         const buf = await e.data.arrayBuffer();
@@ -438,6 +569,7 @@ async function stopRecording() {
   el.statusLabel.textContent = 'IDLE';
   el.statusLabel.className = 'status idle';
   el.armBtn.disabled = false;
+  setQualityControlsEnabled(true);
 
   alert(`Saved to:\n${state.sessionDir}`);
 }
