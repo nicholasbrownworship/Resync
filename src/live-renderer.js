@@ -1,19 +1,31 @@
 // ReSync Live Mode (experimental)
 // --------------------------------
-// A scene-based switcher modeled on OBS. Each scene holds a list of
-// source "items" — a camera plus a position/size within the scene's
-// canvas, layered bottom-to-top by array order (like OBS's source
-// list).
+// A scene-based switcher modeled on OBS.
 //
-// Preview vs. Program — the point of these being separate:
-// Preview always reflects live edits to whatever scene is selected —
-// drag a source, see it move immediately, so you can compose safely.
-// Program does NOT read the scene definition directly. Instead, Cut
-// and Fade take a SNAPSHOT (a shallow copy of that scene's items) and
-// Program renders from the snapshot. That decouples "editing a scene"
-// from "what's currently live" even when it's the same scene selected
-// in both places — editing continues to update Preview, but Program
-// stays exactly as it was until you explicitly Cut or Fade again.
+// Preview vs. Program — the actual model:
+// Preview always shows live video for whatever scene is selected, and
+// is the editing surface — drag/resize/reorder/add/remove sources and
+// see it immediately. Program shows live video too, but its ARRANGEMENT
+// (which sources, at what position/size) only updates when you hit Cut
+// or Fade. Editing Preview must never freeze or interrupt what's
+// already live on Program.
+//
+// How that's implemented: a camera device isn't owned by a scene item
+// directly. Opening a camera creates a "connection" (stream + video
+// element) in a shared registry, keyed by an id. A scene item is just
+// layout data — {connId, x, y, w, h} — pointing at one of those
+// connections. Program's pushed arrangement is a plain array of the
+// same {connId, x, y, w, h} shape, cloned at Cut/Fade time. Because
+// both Preview's scene and Program's arrangement reference connections
+// by id rather than owning the stream directly, a connection keeps
+// playing live video for whichever side still needs it. A connection
+// is only torn down once a garbage-collection pass finds NOTHING
+// referencing its id anymore — not the editable scenes, not Program,
+// not an in-flight transition. That's what lets you freely edit,
+// remove, or change the resolution of a source in a scene that's
+// currently live: Program keeps playing the old connection, live,
+// until you Cut/Fade again — at which point the old connection is
+// dropped automatically because nothing points at it anymore.
 // (RESOLUTION_PRESETS is defined in renderer.js, loaded first — reused
 // here rather than duplicated, since classic <script> tags share scope.)
 //
@@ -26,14 +38,6 @@
 //    Mode's — most cameras only allow one active consumer, so using the
 //    same physical camera in both modes at once may fail or hand the
 //    device to whichever mode asked last.
-//  - Changing a source's resolution stops its old camera stream
-//    immediately. If that exact stream was already frozen into a
-//    Program snapshot, Program will go blank/frozen for that source
-//    until you Cut/Fade again to take a fresh snapshot. Expected given
-//    the "Program only updates on push" model, but worth knowing.
-//  - Removing a scene or a source from a scene tears down its camera
-//    stream even if a Program snapshot still references it — same
-//    underlying tradeoff as above.
 
 const liveEl = {
   modeRecordBtn: document.getElementById('modeRecordBtn'),
@@ -64,10 +68,11 @@ const liveEl = {
 };
 
 const liveState = {
-  scenes: [],          // { id, name, items: [{id, deviceId, label, stream, videoEl, x, y, w, h, resolutionPreset}] }
+  scenes: [],           // { id, name, items: [{id, connId, x, y, w, h}] }
   previewSceneId: null,
   programSceneId: null,  // which scene is "live", for labeling only
-  programItems: [],      // frozen snapshot actually rendered to Program
+  programItems: [],      // the pushed arrangement Program actually renders
+  connections: new Map(), // connId -> { deviceId, label, stream, videoEl, resolutionPreset }
   transition: null,      // { fromItems, toItems, toSceneId, startedAt, duration } while a Fade is running
   baseDir: null,
   recording: false,
@@ -105,6 +110,54 @@ function cloneItems(scene) {
 }
 
 // ---------------------------------------------------------------------
+// Camera connections — see file header for the model.
+// ---------------------------------------------------------------------
+
+async function createConnection(deviceId, label, resolutionPreset) {
+  const preset = RESOLUTION_PRESETS[resolutionPreset];
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { deviceId: { exact: deviceId }, ...preset.constraints },
+    audio: false
+  });
+  const video = document.createElement('video');
+  video.autoplay = true;
+  video.muted = true;
+  video.playsInline = true;
+  video.srcObject = stream;
+  liveEl.offscreenVideos.appendChild(video);
+
+  const connId = nextLiveId('conn');
+  liveState.connections.set(connId, { deviceId, label, stream, videoEl: video, resolutionPreset });
+  return connId;
+}
+
+function teardownConnection(connId) {
+  const conn = liveState.connections.get(connId);
+  if (!conn) return;
+  conn.stream.getTracks().forEach((t) => t.stop());
+  conn.videoEl.remove();
+  liveState.connections.delete(connId);
+}
+
+// Tears down any connection nothing references anymore — not an
+// editable scene, not Program's pushed arrangement, not an in-flight
+// transition. This is what lets Program keep playing a connection
+// live even after you've edited or removed it from the scene it
+// originally came from.
+function gcConnections() {
+  const used = new Set();
+  liveState.scenes.forEach((scene) => scene.items.forEach((item) => used.add(item.connId)));
+  liveState.programItems.forEach((item) => used.add(item.connId));
+  if (liveState.transition) {
+    liveState.transition.fromItems.forEach((item) => used.add(item.connId));
+    liveState.transition.toItems.forEach((item) => used.add(item.connId));
+  }
+  for (const connId of [...liveState.connections.keys()]) {
+    if (!used.has(connId)) teardownConnection(connId);
+  }
+}
+
+// ---------------------------------------------------------------------
 // Scenes
 // ---------------------------------------------------------------------
 
@@ -118,16 +171,10 @@ function addScene() {
 function removeScene(id) {
   const idx = liveState.scenes.findIndex((s) => s.id === id);
   if (idx === -1) return;
-  const [scene] = liveState.scenes.splice(idx, 1);
-  scene.items.forEach(teardownItem);
+  liveState.scenes.splice(idx, 1);
   if (liveState.previewSceneId === id) liveState.previewSceneId = liveState.scenes[0]?.id || null;
   if (liveState.programSceneId === id) liveState.programSceneId = null;
-  refreshLiveUI();
-}
-
-function teardownItem(item) {
-  if (item.stream) item.stream.getTracks().forEach((t) => t.stop());
-  if (item.videoEl) item.videoEl.remove();
+  refreshLiveUI(); // gcConnections inside here tears down anything now unused
 }
 
 // ---------------------------------------------------------------------
@@ -137,35 +184,12 @@ function teardownItem(item) {
 async function addSceneItem(scene, deviceId, label) {
   if (!deviceId) return;
   try {
-    const resolutionPreset = 'device-default';
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { deviceId: { exact: deviceId }, ...RESOLUTION_PRESETS[resolutionPreset].constraints },
-      audio: false
-    });
-    const video = document.createElement('video');
-    video.autoplay = true;
-    video.muted = true;
-    video.playsInline = true;
-    video.srcObject = stream;
-    liveEl.offscreenVideos.appendChild(video);
-
-    // First source in a scene defaults to full-frame; later ones default
-    // to a staggered PiP box so they don't land exactly on top of each
-    // other and are easy to grab and reposition.
+    const connId = await createConnection(deviceId, label, 'device-default');
     const n = scene.items.length;
     const rect = n === 0
       ? { x: 0, y: 0, w: 1, h: 1 }
       : { x: 0.55 - 0.03 * n, y: 0.55 - 0.03 * n, w: 0.4, h: 0.4 };
-
-    scene.items.push({
-      id: nextLiveId('item'),
-      deviceId,
-      label,
-      stream,
-      videoEl: video,
-      resolutionPreset,
-      ...rect
-    });
+    scene.items.push({ id: nextLiveId('item'), connId, ...rect });
     refreshLiveUI();
   } catch (err) {
     alert(`Couldn't open that camera: ${err.message}`);
@@ -175,10 +199,9 @@ async function addSceneItem(scene, deviceId, label) {
 function removeSceneItem(scene, itemId) {
   const idx = scene.items.findIndex((i) => i.id === itemId);
   if (idx === -1) return;
-  const [item] = scene.items.splice(idx, 1);
-  teardownItem(item);
+  scene.items.splice(idx, 1);
   if (expandedSettingsItemId === itemId) expandedSettingsItemId = null;
-  refreshLiveUI();
+  refreshLiveUI(); // connection stays alive if Program still references it
 }
 
 function moveSceneItem(scene, itemId, direction) {
@@ -190,53 +213,23 @@ function moveSceneItem(scene, itemId, direction) {
   refreshLiveUI();
 }
 
-// Mirrors Record Mode's applyResolution: stop the old stream *before*
-// reopening the device, or Chromium can just hand back the existing
-// capture session and ignore the new constraints.
+// Opens a NEW connection at the new resolution and repoints this item
+// at it. The OLD connection isn't touched here — if Program's pushed
+// arrangement still references it, gcConnections() (via refreshLiveUI)
+// leaves it alone and Program keeps playing it live, unchanged, until
+// you Cut/Fade again.
 async function applySceneItemResolution(item, presetKey) {
-  const preset = RESOLUTION_PRESETS[presetKey];
-  const previousPreset = item.resolutionPreset;
-
-  if (item.stream) item.stream.getTracks().forEach((t) => t.stop());
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  const conn = liveState.connections.get(item.connId);
+  const deviceId = conn?.deviceId;
+  const label = conn?.label || 'Camera';
+  if (!deviceId) return;
 
   try {
-    const newStream = await navigator.mediaDevices.getUserMedia({
-      video: { deviceId: { exact: item.deviceId }, ...preset.constraints },
-      audio: false
-    });
-    if (item.videoEl) item.videoEl.remove();
-    const video = document.createElement('video');
-    video.autoplay = true;
-    video.muted = true;
-    video.playsInline = true;
-    video.srcObject = newStream;
-    liveEl.offscreenVideos.appendChild(video);
-
-    item.stream = newStream;
-    item.videoEl = video;
-    item.resolutionPreset = presetKey;
-    renderSceneItemsPanel();
+    const newConnId = await createConnection(deviceId, label, presetKey);
+    item.connId = newConnId;
+    refreshLiveUI();
   } catch (err) {
     alert(`Couldn't switch resolution: ${err.message}`);
-    try {
-      const fallback = await navigator.mediaDevices.getUserMedia({
-        video: { deviceId: { exact: item.deviceId }, ...RESOLUTION_PRESETS[previousPreset].constraints },
-        audio: false
-      });
-      const video = document.createElement('video');
-      video.autoplay = true;
-      video.muted = true;
-      video.playsInline = true;
-      video.srcObject = fallback;
-      liveEl.offscreenVideos.appendChild(video);
-      item.stream = fallback;
-      item.videoEl = video;
-      item.resolutionPreset = previousPreset;
-    } catch (err2) {
-      alert('Also failed to restore the previous camera stream for this source. Remove and re-add it.');
-    }
-    renderSceneItemsPanel();
   }
 }
 
@@ -245,6 +238,7 @@ async function applySceneItemResolution(item, presetKey) {
 // ---------------------------------------------------------------------
 
 function refreshLiveUI() {
+  gcConnections();
   renderSceneList();
   renderSceneItemsPanel();
   populateSceneItemDeviceSelect();
@@ -300,12 +294,13 @@ function renderSceneItemsPanel() {
 
   // Render top-of-stack first so the list visually matches layering.
   [...scene.items].reverse().forEach((sceneItem) => {
+    const conn = liveState.connections.get(sceneItem.connId);
     const row = document.createElement('div');
     row.className = 'scene-item-row';
 
     const label = document.createElement('span');
     label.className = 'scene-item-row-label';
-    label.textContent = sceneItem.label;
+    label.textContent = conn ? conn.label : '(disconnected)';
     row.appendChild(label);
 
     const settingsBtn = document.createElement('button');
@@ -337,13 +332,13 @@ function renderSceneItemsPanel() {
     row.appendChild(removeBtn);
     liveEl.sceneItemsList.appendChild(row);
 
-    if (expandedSettingsItemId === sceneItem.id) {
-      liveEl.sceneItemsList.appendChild(buildItemSettingsPanel(sceneItem));
+    if (expandedSettingsItemId === sceneItem.id && conn) {
+      liveEl.sceneItemsList.appendChild(buildItemSettingsPanel(sceneItem, conn));
     }
   });
 }
 
-function buildItemSettingsPanel(sceneItem) {
+function buildItemSettingsPanel(sceneItem, conn) {
   const panel = document.createElement('div');
   panel.className = 'quality-controls item-settings-panel';
 
@@ -356,7 +351,7 @@ function buildItemSettingsPanel(sceneItem) {
     const opt = document.createElement('option');
     opt.value = key;
     opt.textContent = label;
-    if (key === sceneItem.resolutionPreset) opt.selected = true;
+    if (key === conn.resolutionPreset) opt.selected = true;
     resSelect.appendChild(opt);
   });
   resSelect.addEventListener('change', () => applySceneItemResolution(sceneItem, resSelect.value));
@@ -365,7 +360,7 @@ function buildItemSettingsPanel(sceneItem) {
 
   const actual = document.createElement('div');
   actual.className = 'quality-actual';
-  const track = sceneItem.videoEl && sceneItem.stream.getVideoTracks()[0];
+  const track = conn.stream.getVideoTracks()[0];
   if (track) {
     const { width, height, frameRate } = track.getSettings();
     actual.textContent = width && height
@@ -415,13 +410,14 @@ function syncOverlay() {
   if (!scene) return;
 
   scene.items.forEach((sceneItem) => {
+    const conn = liveState.connections.get(sceneItem.connId);
     const box = document.createElement('div');
     box.className = 'source-box';
     positionBoxEl(box, sceneItem);
 
     const label = document.createElement('div');
     label.className = 'source-box-label';
-    label.textContent = sceneItem.label;
+    label.textContent = conn ? conn.label : '(disconnected)';
     box.appendChild(label);
 
     const handle = document.createElement('div');
@@ -484,13 +480,16 @@ function clamp(v, min, max) {
 }
 
 // ---------------------------------------------------------------------
-// Canvas compositor
+// Canvas compositor — reads connections by id every frame, so both
+// Preview and Program show continuously live video regardless of what
+// editing has happened elsewhere.
 // ---------------------------------------------------------------------
 
 function drawItemCover(ctx, item, canvasW, canvasH) {
-  if (!item.videoEl || item.videoEl.readyState < 2) return;
-  const vw = item.videoEl.videoWidth;
-  const vh = item.videoEl.videoHeight;
+  const conn = liveState.connections.get(item.connId);
+  if (!conn || !conn.videoEl || conn.videoEl.readyState < 2) return;
+  const vw = conn.videoEl.videoWidth;
+  const vh = conn.videoEl.videoHeight;
   if (!vw || !vh) return;
 
   const boxX = item.x * canvasW;
@@ -508,7 +507,7 @@ function drawItemCover(ctx, item, canvasW, canvasH) {
   ctx.beginPath();
   ctx.rect(boxX, boxY, boxW, boxH);
   ctx.clip();
-  ctx.drawImage(item.videoEl, dx, dy, dw, dh);
+  ctx.drawImage(conn.videoEl, dx, dy, dw, dh);
   ctx.restore();
 }
 
@@ -524,12 +523,9 @@ function renderLoop() {
   const w = liveEl.programCanvas.width;
   const h = liveEl.programCanvas.height;
 
-  // Preview always reflects live edits to the selected scene.
   const previewScene = sceneById(liveState.previewSceneId);
   drawItemsComposite(pvwCtx, previewScene ? previewScene.items : [], w, h);
 
-  // Program renders only from the frozen snapshot — never the live
-  // scene definition — so editing Preview can't leak onto Program.
   if (liveState.transition) {
     const { fromItems, toItems, toSceneId, startedAt, duration } = liveState.transition;
     const t = Math.min(1, (performance.now() - startedAt) / duration);
@@ -544,6 +540,7 @@ function renderLoop() {
       liveState.programItems = toItems;
       liveState.programSceneId = toSceneId;
       liveState.transition = null;
+      gcConnections();
       renderSceneList();
     }
   } else {
@@ -555,7 +552,8 @@ function renderLoop() {
 requestAnimationFrame(renderLoop);
 
 // ---------------------------------------------------------------------
-// Transitions — both take a snapshot; neither reads the scene live.
+// Transitions — push a cloned arrangement to Program. Connections keep
+// playing live throughout; only which ones are "pushed" changes.
 // ---------------------------------------------------------------------
 
 liveEl.cutBtn.addEventListener('click', () => {
