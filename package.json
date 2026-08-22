@@ -1,6 +1,6 @@
 {
   "name": "resync",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Synced multi-camera, multi-audio recorder. Arrange sources, hit record, get one separate file per source, all started and stopped together.",
   "main": "main.js",
   "author": "First Measure Studios",

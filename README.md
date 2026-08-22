@@ -141,13 +141,17 @@ the **Live** button in the top bar.
 **What it does today (Phase 1 + 2):**
 - Named **scenes**, each holding **multiple camera sources**, layered
   and positioned like OBS — not just one full-frame camera per scene.
-- A **Preview**/**Program** monitor pair. Preview doubles as the
-  editing surface: drag a source directly on it to move it, drag its
-  bottom-right corner to resize. The **Sources in scene** panel lists
-  everything in the selected scene with front/back layering controls
+- A **Preview**/**Program** monitor pair. Preview always reflects live
+  edits to whichever scene is selected — drag a source directly on it
+  to move it, drag its bottom-right corner to resize. **Program never
+  reads the live scene** — Cut and Fade take a snapshot of the scene at
+  that moment, so editing a scene (even one that's currently live)
+  can't leak onto Program until you explicitly push it again. The
+  **Sources in scene** panel lists everything in the selected scene
+  with a settings gear (per-source resolution), front/back layering,
   and remove buttons.
-- **Cut** (instant) or **Fade** (500ms crossfade) sends whatever's in
-  Preview to Program.
+- **Cut** (instant) or **Fade** (500ms crossfade) sends the current
+  Preview snapshot to Program.
 - **Start Recording** captures the composited Program canvas to its
   own file.
 
@@ -160,6 +164,13 @@ the **Live** button in the top bar.
 - Resize is free-form — no aspect-ratio lock yet, so a source can be
   stretched out of proportion if you're not careful with the corner
   handle.
+- Changing a source's resolution stops its old camera stream right
+  away. If that exact stream was already frozen into a Program
+  snapshot, Program goes blank/frozen for that source until the next
+  Cut/Fade takes a fresh snapshot — a direct consequence of Program
+  only updating on push, worth knowing before it surprises you live.
+  The same applies to removing a scene or a source that Program is
+  currently showing.
 
 **A real caveat to know before testing:** cameras are opened
 independently in Live Mode from however they're used in Record Mode.

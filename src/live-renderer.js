@@ -1,14 +1,23 @@
 // ReSync Live Mode (experimental)
 // --------------------------------
-// A scene-based switcher modeled on OBS. Each scene now holds a list of
+// A scene-based switcher modeled on OBS. Each scene holds a list of
 // source "items" — a camera plus a position/size within the scene's
 // canvas, layered bottom-to-top by array order (like OBS's source
-// list). Preview shows whichever scene is selected and is also the
-// live editing surface: drag a source directly on it to move it, drag
-// its corner to resize. Program shows whatever's live, untouched by
-// editing.
+// list).
 //
-// Known Phase 2 limitations, called out in the UI banner too:
+// Preview vs. Program — the point of these being separate:
+// Preview always reflects live edits to whatever scene is selected —
+// drag a source, see it move immediately, so you can compose safely.
+// Program does NOT read the scene definition directly. Instead, Cut
+// and Fade take a SNAPSHOT (a shallow copy of that scene's items) and
+// Program renders from the snapshot. That decouples "editing a scene"
+// from "what's currently live" even when it's the same scene selected
+// in both places — editing continues to update Preview, but Program
+// stays exactly as it was until you explicitly Cut or Fade again.
+// (RESOLUTION_PRESETS is defined in renderer.js, loaded first — reused
+// here rather than duplicated, since classic <script> tags share scope.)
+//
+// Known limitations, called out in the UI banner too:
 //  - Video only. No audio bus yet (Phase 3) and no streaming out yet
 //    (Phase 4) — "Start Recording" captures the Program canvas to a
 //    single video-only file.
@@ -17,6 +26,14 @@
 //    Mode's — most cameras only allow one active consumer, so using the
 //    same physical camera in both modes at once may fail or hand the
 //    device to whichever mode asked last.
+//  - Changing a source's resolution stops its old camera stream
+//    immediately. If that exact stream was already frozen into a
+//    Program snapshot, Program will go blank/frozen for that source
+//    until you Cut/Fade again to take a fresh snapshot. Expected given
+//    the "Program only updates on push" model, but worth knowing.
+//  - Removing a scene or a source from a scene tears down its camera
+//    stream even if a Program snapshot still references it — same
+//    underlying tradeoff as above.
 
 const liveEl = {
   modeRecordBtn: document.getElementById('modeRecordBtn'),
@@ -47,10 +64,11 @@ const liveEl = {
 };
 
 const liveState = {
-  scenes: [],          // { id, name, items: [{id, deviceId, label, stream, videoEl, x, y, w, h}] }
+  scenes: [],          // { id, name, items: [{id, deviceId, label, stream, videoEl, x, y, w, h, resolutionPreset}] }
   previewSceneId: null,
-  programSceneId: null,
-  transition: null,    // { fromId, toId, startedAt, duration } while a Fade is running
+  programSceneId: null,  // which scene is "live", for labeling only
+  programItems: [],      // frozen snapshot actually rendered to Program
+  transition: null,      // { fromItems, toItems, toSceneId, startedAt, duration } while a Fade is running
   baseDir: null,
   recording: false,
   recorder: null,
@@ -61,6 +79,7 @@ const liveState = {
 
 let liveIdCounter = 0;
 const nextLiveId = (prefix) => `${prefix}_${++liveIdCounter}`;
+let expandedSettingsItemId = null;
 
 // ---------------------------------------------------------------------
 // Mode switching
@@ -79,6 +98,10 @@ function setMode(mode) {
 
 function sceneById(id) {
   return liveState.scenes.find((s) => s.id === id) || null;
+}
+
+function cloneItems(scene) {
+  return scene ? scene.items.map((item) => ({ ...item })) : [];
 }
 
 // ---------------------------------------------------------------------
@@ -114,8 +137,9 @@ function teardownItem(item) {
 async function addSceneItem(scene, deviceId, label) {
   if (!deviceId) return;
   try {
+    const resolutionPreset = 'device-default';
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { deviceId: { exact: deviceId } },
+      video: { deviceId: { exact: deviceId }, ...RESOLUTION_PRESETS[resolutionPreset].constraints },
       audio: false
     });
     const video = document.createElement('video');
@@ -139,6 +163,7 @@ async function addSceneItem(scene, deviceId, label) {
       label,
       stream,
       videoEl: video,
+      resolutionPreset,
       ...rect
     });
     refreshLiveUI();
@@ -152,6 +177,7 @@ function removeSceneItem(scene, itemId) {
   if (idx === -1) return;
   const [item] = scene.items.splice(idx, 1);
   teardownItem(item);
+  if (expandedSettingsItemId === itemId) expandedSettingsItemId = null;
   refreshLiveUI();
 }
 
@@ -162,6 +188,56 @@ function moveSceneItem(scene, itemId, direction) {
   if (swapWith < 0 || swapWith >= scene.items.length) return;
   [scene.items[idx], scene.items[swapWith]] = [scene.items[swapWith], scene.items[idx]];
   refreshLiveUI();
+}
+
+// Mirrors Record Mode's applyResolution: stop the old stream *before*
+// reopening the device, or Chromium can just hand back the existing
+// capture session and ignore the new constraints.
+async function applySceneItemResolution(item, presetKey) {
+  const preset = RESOLUTION_PRESETS[presetKey];
+  const previousPreset = item.resolutionPreset;
+
+  if (item.stream) item.stream.getTracks().forEach((t) => t.stop());
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  try {
+    const newStream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: { exact: item.deviceId }, ...preset.constraints },
+      audio: false
+    });
+    if (item.videoEl) item.videoEl.remove();
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = newStream;
+    liveEl.offscreenVideos.appendChild(video);
+
+    item.stream = newStream;
+    item.videoEl = video;
+    item.resolutionPreset = presetKey;
+    renderSceneItemsPanel();
+  } catch (err) {
+    alert(`Couldn't switch resolution: ${err.message}`);
+    try {
+      const fallback = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { exact: item.deviceId }, ...RESOLUTION_PRESETS[previousPreset].constraints },
+        audio: false
+      });
+      const video = document.createElement('video');
+      video.autoplay = true;
+      video.muted = true;
+      video.playsInline = true;
+      video.srcObject = fallback;
+      liveEl.offscreenVideos.appendChild(video);
+      item.stream = fallback;
+      item.videoEl = video;
+      item.resolutionPreset = previousPreset;
+    } catch (err2) {
+      alert('Also failed to restore the previous camera stream for this source. Remove and re-add it.');
+    }
+    renderSceneItemsPanel();
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -232,6 +308,14 @@ function renderSceneItemsPanel() {
     label.textContent = sceneItem.label;
     row.appendChild(label);
 
+    const settingsBtn = document.createElement('button');
+    settingsBtn.textContent = '⚙';
+    settingsBtn.title = 'Source settings';
+    settingsBtn.addEventListener('click', () => {
+      expandedSettingsItemId = expandedSettingsItemId === sceneItem.id ? null : sceneItem.id;
+      renderSceneItemsPanel();
+    });
+
     const upBtn = document.createElement('button');
     upBtn.textContent = '↑';
     upBtn.title = 'Bring forward';
@@ -247,11 +331,51 @@ function renderSceneItemsPanel() {
     removeBtn.title = 'Remove from scene';
     removeBtn.addEventListener('click', () => removeSceneItem(scene, sceneItem.id));
 
+    row.appendChild(settingsBtn);
     row.appendChild(upBtn);
     row.appendChild(downBtn);
     row.appendChild(removeBtn);
     liveEl.sceneItemsList.appendChild(row);
+
+    if (expandedSettingsItemId === sceneItem.id) {
+      liveEl.sceneItemsList.appendChild(buildItemSettingsPanel(sceneItem));
+    }
   });
+}
+
+function buildItemSettingsPanel(sceneItem) {
+  const panel = document.createElement('div');
+  panel.className = 'quality-controls item-settings-panel';
+
+  const resRow = document.createElement('div');
+  resRow.className = 'quality-row';
+  const resLabel = document.createElement('label');
+  resLabel.textContent = 'Resolution';
+  const resSelect = document.createElement('select');
+  Object.entries(RESOLUTION_PRESETS).forEach(([key, { label }]) => {
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = label;
+    if (key === sceneItem.resolutionPreset) opt.selected = true;
+    resSelect.appendChild(opt);
+  });
+  resSelect.addEventListener('change', () => applySceneItemResolution(sceneItem, resSelect.value));
+  resRow.appendChild(resLabel);
+  resRow.appendChild(resSelect);
+
+  const actual = document.createElement('div');
+  actual.className = 'quality-actual';
+  const track = sceneItem.videoEl && sceneItem.stream.getVideoTracks()[0];
+  if (track) {
+    const { width, height, frameRate } = track.getSettings();
+    actual.textContent = width && height
+      ? `Actual: ${width}×${height}${frameRate ? ` @ ${Math.round(frameRate)}fps` : ''}`
+      : 'Actual resolution unknown';
+  }
+
+  panel.appendChild(resRow);
+  panel.appendChild(actual);
+  return panel;
 }
 
 async function populateSceneItemDeviceSelect() {
@@ -360,9 +484,7 @@ function clamp(v, min, max) {
 }
 
 // ---------------------------------------------------------------------
-// Canvas compositor — draws every item in a scene, bottom-to-top, with
-// a "cover" fit within its own box so a source doesn't stretch when its
-// box has a different aspect ratio than the camera.
+// Canvas compositor
 // ---------------------------------------------------------------------
 
 function drawItemCover(ctx, item, canvasW, canvasH) {
@@ -390,11 +512,10 @@ function drawItemCover(ctx, item, canvasW, canvasH) {
   ctx.restore();
 }
 
-function drawSceneComposite(ctx, scene, w, h) {
+function drawItemsComposite(ctx, items, w, h) {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, w, h);
-  if (!scene) return;
-  scene.items.forEach((item) => drawItemCover(ctx, item, w, h));
+  items.forEach((item) => drawItemCover(ctx, item, w, h));
 }
 
 function renderLoop() {
@@ -403,25 +524,30 @@ function renderLoop() {
   const w = liveEl.programCanvas.width;
   const h = liveEl.programCanvas.height;
 
-  drawSceneComposite(pvwCtx, sceneById(liveState.previewSceneId), w, h);
+  // Preview always reflects live edits to the selected scene.
+  const previewScene = sceneById(liveState.previewSceneId);
+  drawItemsComposite(pvwCtx, previewScene ? previewScene.items : [], w, h);
 
+  // Program renders only from the frozen snapshot — never the live
+  // scene definition — so editing Preview can't leak onto Program.
   if (liveState.transition) {
-    const { fromId, toId, startedAt, duration } = liveState.transition;
+    const { fromItems, toItems, toSceneId, startedAt, duration } = liveState.transition;
     const t = Math.min(1, (performance.now() - startedAt) / duration);
 
-    drawSceneComposite(pgmCtx, sceneById(fromId), w, h);
+    drawItemsComposite(pgmCtx, fromItems, w, h);
     pgmCtx.save();
     pgmCtx.globalAlpha = t;
-    drawSceneComposite(pgmCtx, sceneById(toId), w, h);
+    drawItemsComposite(pgmCtx, toItems, w, h);
     pgmCtx.restore();
 
     if (t >= 1) {
-      liveState.programSceneId = toId;
+      liveState.programItems = toItems;
+      liveState.programSceneId = toSceneId;
       liveState.transition = null;
       renderSceneList();
     }
   } else {
-    drawSceneComposite(pgmCtx, sceneById(liveState.programSceneId), w, h);
+    drawItemsComposite(pgmCtx, liveState.programItems, w, h);
   }
 
   requestAnimationFrame(renderLoop);
@@ -429,14 +555,18 @@ function renderLoop() {
 requestAnimationFrame(renderLoop);
 
 // ---------------------------------------------------------------------
-// Transitions
+// Transitions — both take a snapshot; neither reads the scene live.
 // ---------------------------------------------------------------------
 
 liveEl.cutBtn.addEventListener('click', () => {
   if (!liveState.previewSceneId) return;
-  const prevProgram = liveState.programSceneId;
-  liveState.programSceneId = liveState.previewSceneId;
-  liveState.previewSceneId = prevProgram;
+  const toId = liveState.previewSceneId;
+  const toScene = sceneById(toId);
+  const prevProgramSceneId = liveState.programSceneId;
+
+  liveState.programItems = cloneItems(toScene);
+  liveState.programSceneId = toId;
+  liveState.previewSceneId = prevProgramSceneId || toId;
   liveState.transition = null;
   refreshLiveUI();
 });
@@ -444,9 +574,17 @@ liveEl.cutBtn.addEventListener('click', () => {
 liveEl.fadeBtn.addEventListener('click', () => {
   if (!liveState.previewSceneId || liveState.previewSceneId === liveState.programSceneId) return;
   const toId = liveState.previewSceneId;
-  const fromId = liveState.programSceneId;
-  liveState.previewSceneId = fromId; // old program becomes the new preview once the fade lands
-  liveState.transition = { fromId, toId, startedAt: performance.now(), duration: 500 };
+  const toScene = sceneById(toId);
+  const fromSceneId = liveState.programSceneId;
+
+  liveState.previewSceneId = fromSceneId || toId; // old program becomes the new preview once the fade lands
+  liveState.transition = {
+    fromItems: liveState.programItems,
+    toItems: cloneItems(toScene),
+    toSceneId: toId,
+    startedAt: performance.now(),
+    duration: 500
+  };
   refreshLiveUI();
 });
 

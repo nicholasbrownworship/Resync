@@ -273,6 +273,17 @@ body { flex: 1; min-height: 0; }
 }
 .scene-item-row button:hover { color: var(--accent-2); }
 
+.item-settings-panel {
+  margin: -2px 0 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 5px 5px;
+}
+.item-settings-panel .quality-row select {
+  max-width: 130px;
+}
+
 .transition-controls {
   display: flex;
   gap: 10px;
