@@ -367,8 +367,12 @@ function updateActualResolutionReadout(source) {
 
 // Re-requests the camera stream with new resolution constraints. This is
 // a capture-side change (unlike bitrate), so it has to reopen the
-// device — the old stream's tracks are stopped and the preview/element
-// is repointed at the new one.
+// device. Important: the OLD stream must be stopped *before* requesting
+// the new one — if the device is still actively open when getUserMedia
+// is called again, Chromium can just hand back the existing capture
+// session instead of renegotiating the format, silently ignoring the
+// new constraints. Capture cards in particular can also be slow to
+// release, so there's a short pause before reopening.
 async function applyResolution(source, presetKey) {
   if (state.recording) {
     alert('Stop recording before changing resolution.');
@@ -376,19 +380,37 @@ async function applyResolution(source, presetKey) {
     return;
   }
   const preset = RESOLUTION_PRESETS[presetKey];
+  const previousPreset = source.resolutionPreset;
+
+  source.stream.getTracks().forEach((t) => t.stop());
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
   try {
     const newStream = await navigator.mediaDevices.getUserMedia({
       video: { deviceId: { exact: source.deviceId }, ...preset.constraints },
       audio: false
     });
-    source.stream.getTracks().forEach((t) => t.stop());
     source.stream = newStream;
     source.resolutionPreset = presetKey;
     if (source.videoEl) source.videoEl.srcObject = newStream;
     updateActualResolutionReadout(source);
   } catch (err) {
     alert(`Couldn't switch resolution: ${err.message}`);
-    source.resSelectEl.value = source.resolutionPreset;
+    source.resSelectEl.value = previousPreset;
+    // We already stopped the old stream, so try to recover a working
+    // one at the previous resolution rather than leaving the tile dead.
+    try {
+      const fallback = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { exact: source.deviceId }, ...RESOLUTION_PRESETS[previousPreset].constraints },
+        audio: false
+      });
+      source.stream = fallback;
+      source.resolutionPreset = previousPreset;
+      if (source.videoEl) source.videoEl.srcObject = fallback;
+      updateActualResolutionReadout(source);
+    } catch (err2) {
+      alert('Also failed to restore the previous camera stream. Remove and re-add this source.');
+    }
   }
 }
 
