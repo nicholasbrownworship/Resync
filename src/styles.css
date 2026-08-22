@@ -221,6 +221,29 @@ select {
   transition: width 0.05s linear;
 }
 
+.gain-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.gain-row label {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.gain-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent-2);
+}
+.gain-readout {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 44px;
+  text-align: right;
+}
+
 .quality-controls {
   margin-top: 8px;
   padding-top: 8px;

@@ -202,6 +202,38 @@ function makeTile(source) {
     meter.appendChild(fill);
     tile.appendChild(meter);
     source.meterEl = fill;
+
+    const gainRow = document.createElement('div');
+    gainRow.className = 'gain-row';
+    const gainLabel = document.createElement('label');
+    gainLabel.textContent = 'Gain';
+    const gainSlider = document.createElement('input');
+    gainSlider.type = 'range';
+    gainSlider.min = '-24';
+    gainSlider.max = '24';
+    gainSlider.step = '1';
+    gainSlider.value = String(source.gainDb);
+    const gainReadout = document.createElement('span');
+    gainReadout.className = 'gain-readout';
+    gainReadout.textContent = formatDb(source.gainDb);
+
+    gainSlider.addEventListener('input', () => {
+      const db = Number(gainSlider.value);
+      source.gainDb = db;
+      gainReadout.textContent = formatDb(db);
+      if (source.gainNode) {
+        // Applied live — this feeds both the meter and, if you're mid
+        // take, the actual recording. Baked into the file, not just
+        // monitoring, so it doubles as a pre-record gain-staging knob.
+        source.gainNode.gain.setTargetAtTime(dbToLinear(db), source.audioCtx.currentTime, 0.01);
+      }
+    });
+
+    gainRow.appendChild(gainLabel);
+    gainRow.appendChild(gainSlider);
+    gainRow.appendChild(gainReadout);
+    tile.appendChild(gainRow);
+    source.gainSliderEl = gainSlider;
   }
 
   const footer = document.createElement('div');
@@ -237,22 +269,44 @@ function removeSource(id) {
   const idx = state.sources.findIndex((s) => s.id === id);
   if (idx === -1) return;
   const [source] = state.sources.splice(idx, 1);
+
+  // Processed (post-gain) stream that fed the preview/recorder.
   if (source.stream) source.stream.getTracks().forEach((t) => t.stop());
-  if (source.audioCtx) source.audioCtx.close();
+
+  if (source.sharedAudio) {
+    // One of several split channels from the same physical device —
+    // only tear down the underlying capture + context once every
+    // channel tile referencing it has been removed.
+    source.sharedAudio.refCount -= 1;
+    if (source.sharedAudio.refCount <= 0) {
+      source.sharedAudio.rawStream.getTracks().forEach((t) => t.stop());
+      source.sharedAudio.ctx.close();
+    }
+  } else {
+    if (source.rawStream) source.rawStream.getTracks().forEach((t) => t.stop());
+    if (source.audioCtx) source.audioCtx.close();
+  }
+
   source.tileEl.remove();
 }
 
 // --------------------------------------------------------------------
-// Metering (audio sources only)
+// dB <-> linear gain helpers
 // --------------------------------------------------------------------
 
-function attachMeter(source, streamForMeter) {
-  const ctx = new AudioContext();
-  const src = ctx.createMediaStreamSource(streamForMeter);
+const dbToLinear = (db) => Math.pow(10, db / 20);
+const formatDb = (db) => `${db > 0 ? '+' : ''}${db} dB`;
+
+// --------------------------------------------------------------------
+// Metering (audio sources only) — taps the signal *after* the gain
+// node, so the meter reflects what will actually end up in the file,
+// not the raw input level.
+// --------------------------------------------------------------------
+
+function attachMeter(source, ctx, tapNode) {
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 512;
-  src.connect(analyser);
-  source.audioCtx = ctx;
+  tapNode.connect(analyser);
 
   const data = new Uint8Array(analyser.frequencyBinCount);
   function tick() {
@@ -339,7 +393,7 @@ async function applyResolution(source, presetKey) {
 }
 
 async function addAudioSource(deviceId, label) {
-  const stream = await navigator.mediaDevices.getUserMedia({
+  const rawStream = await navigator.mediaDevices.getUserMedia({
     audio: {
       deviceId: { exact: deviceId },
       echoCancellation: false,
@@ -349,16 +403,30 @@ async function addAudioSource(deviceId, label) {
     video: false
   });
 
+  // Route through a GainNode so the slider on the tile affects both the
+  // meter and whatever actually gets recorded, not just monitoring.
+  const ctx = new AudioContext();
+  const srcNode = ctx.createMediaStreamSource(rawStream);
+  const gainNode = ctx.createGain();
+  gainNode.gain.value = 1; // 0 dB to start
+  srcNode.connect(gainNode);
+  const dest = ctx.createMediaStreamDestination();
+  gainNode.connect(dest);
+
   const source = {
     id: nextId(),
     kind: 'audio',
     label,
     deviceId,
-    stream
+    rawStream,
+    stream: dest.stream, // post-gain — this is what gets previewed/recorded
+    audioCtx: ctx,
+    gainNode,
+    gainDb: 0
   };
   state.sources.push(source);
   makeTile(source);
-  attachMeter(source, stream);
+  attachMeter(source, ctx, gainNode);
 }
 
 async function addAudioSourceFromDropdown() {
@@ -398,10 +466,28 @@ async function addAudioChannelsSeparately() {
       `This device only exposed ${channelCount} channel to the app, so there's nothing to split. ` +
       `Adding it as a single source instead.`
     );
-    const source = { id: nextId(), kind: 'audio', label: baseLabel, deviceId, stream };
+    const ctx = new AudioContext();
+    const srcNode = ctx.createMediaStreamSource(stream);
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = 1;
+    srcNode.connect(gainNode);
+    const dest = ctx.createMediaStreamDestination();
+    gainNode.connect(dest);
+
+    const source = {
+      id: nextId(),
+      kind: 'audio',
+      label: baseLabel,
+      deviceId,
+      rawStream: stream,
+      stream: dest.stream,
+      audioCtx: ctx,
+      gainNode,
+      gainDb: 0
+    };
     state.sources.push(source);
     makeTile(source);
-    attachMeter(source, stream);
+    attachMeter(source, ctx, gainNode);
     return;
   }
 
@@ -410,9 +496,14 @@ async function addAudioChannelsSeparately() {
   const splitter = ctx.createChannelSplitter(channelCount);
   src.connect(splitter);
 
+  const sharedAudio = { ctx, rawStream: stream, refCount: channelCount };
+
   for (let ch = 0; ch < channelCount; ch++) {
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = 1;
+    splitter.connect(gainNode, ch, 0);
     const dest = ctx.createMediaStreamDestination();
-    splitter.connect(dest, ch, 0);
+    gainNode.connect(dest);
 
     const source = {
       id: nextId(),
@@ -421,18 +512,15 @@ async function addAudioChannelsSeparately() {
       deviceId,
       stream: dest.stream,
       channelIndex: ch,
-      audioCtx: null // shared ctx closed once, on the last channel below
+      audioCtx: ctx,
+      gainNode,
+      gainDb: 0,
+      sharedAudio // shared capture + context, torn down once every channel using it is removed
     };
     state.sources.push(source);
     makeTile(source);
-    attachMeter(source, dest.stream);
+    attachMeter(source, ctx, gainNode);
   }
-
-  // Keep the shared context + original stream alive as long as any
-  // channel tile exists; tag it onto the first channel source so
-  // removeSource's ctx.close() call cleans it up eventually. For
-  // simplicity we don't auto-close mid-session — closing while other
-  // channel tiles still reference it would kill their audio too.
 }
 
 // --------------------------------------------------------------------

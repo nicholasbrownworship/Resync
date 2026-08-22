@@ -18,6 +18,13 @@ broadcast tool.
   card, and each mic on your Focusrite/interface).
 - Each added source gets a tile with a live preview (video thumbnail or
   an audio level meter) and an editable label.
+- Every audio source has a **Gain** slider (-24 dB to +24 dB) right
+  under its meter. It's applied live via a Web Audio `GainNode` sitting
+  between the mic and both the meter and the recording — so it's a
+  real pre-record gain-staging control, not just a monitoring level,
+  and the meter always reflects what will actually end up in the file.
+  It stays adjustable during recording too, in case you need to nudge
+  someone's level mid-session.
 - Each camera has its own **resolution** and **bitrate** dropdowns
   right under its preview. Resolution requests are "ideal," not
   "exact" — the tile shows what the device actually negotiated, since
