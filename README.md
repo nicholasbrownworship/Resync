@@ -138,12 +138,18 @@ A separate, opt-in mode alongside the default recorder above — modeled
 on OBS rather than on multitrack isolated recording. Switch to it with
 the **Live** button in the top bar.
 
-**What it does today (Phase 1):**
-- Named **scenes**, each holding one full-frame camera source.
-- A **Preview**/**Program** monitor pair — click a scene to load it
-  into Preview, then **Cut** (instant) or **Fade** (500ms crossfade)
-  to send it to Program.
-- **Start Recording** captures the Program canvas to its own file.
+**What it does today (Phase 1 + 2):**
+- Named **scenes**, each holding **multiple camera sources**, layered
+  and positioned like OBS — not just one full-frame camera per scene.
+- A **Preview**/**Program** monitor pair. Preview doubles as the
+  editing surface: drag a source directly on it to move it, drag its
+  bottom-right corner to resize. The **Sources in scene** panel lists
+  everything in the selected scene with front/back layering controls
+  and remove buttons.
+- **Cut** (instant) or **Fade** (500ms crossfade) sends whatever's in
+  Preview to Program.
+- **Start Recording** captures the composited Program canvas to its
+  own file.
 
 **What it doesn't do yet:**
 - No audio mixing/bus — Program recordings are video-only. That's
@@ -151,8 +157,9 @@ the **Live** button in the top bar.
 - No live streaming (RTMP to YouTube/Twitch) — that's Phase 4, and the
   one most likely to need real tuning once we're testing against
   actual encode performance.
-- One source per scene, full-frame only — multi-source layouts and
-  picture-in-picture are Phase 2.
+- Resize is free-form — no aspect-ratio lock yet, so a source can be
+  stretched out of proportion if you're not careful with the corner
+  handle.
 
 **A real caveat to know before testing:** cameras are opened
 independently in Live Mode from however they're used in Record Mode.

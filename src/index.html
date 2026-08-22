@@ -87,12 +87,17 @@
       <div class="monitors">
         <div class="monitor-row">
           <div class="monitor">
-            <div class="monitor-label">Preview</div>
-            <canvas id="previewCanvas" width="640" height="360"></canvas>
+            <div class="monitor-label">Preview (drag to arrange)</div>
+            <div class="monitor-canvas-wrap">
+              <canvas id="previewCanvas" width="640" height="360"></canvas>
+              <div id="previewOverlay" class="scene-edit-overlay"></div>
+            </div>
           </div>
           <div class="monitor monitor-program">
             <div class="monitor-label monitor-label-live">Program (live)</div>
-            <canvas id="programCanvas" width="640" height="360"></canvas>
+            <div class="monitor-canvas-wrap">
+              <canvas id="programCanvas" width="640" height="360"></canvas>
+            </div>
           </div>
         </div>
 
@@ -110,6 +115,21 @@
           <button id="stopProgramRecBtn" class="btn btn-stop" disabled>Stop</button>
         </div>
       </div>
+
+      <aside class="scene-sources-panel">
+        <h2>Sources in scene</h2>
+        <div id="sceneItemsList" class="scene-items-list"></div>
+        <div class="add-row">
+          <label>Camera</label>
+          <select id="sceneItemDeviceSelect"></select>
+          <button id="addSceneItemBtn" class="btn">+ Add Source</button>
+        </div>
+        <p class="hint">
+          Drag a source directly on the Preview monitor to move it; drag
+          its bottom-right corner to resize. Use the arrows here to
+          change layering (front/back).
+        </p>
+      </aside>
     </div>
 
     <div id="offscreenVideos" class="offscreen-videos"></div>

@@ -1,18 +1,18 @@
 // ReSync Live Mode (experimental)
 // --------------------------------
-// A scene-based switcher modeled on OBS: each scene holds one full-frame
-// video source (multi-source layouts are a later phase). Preview shows
-// the scene you're about to cut to; Program shows what's live. This is
-// intentionally separate from the Record Mode code in renderer.js —
-// different mental model, different state, and keeping them apart means
-// Record Mode (the default, everyday path) can't be destabilized by
-// changes here.
+// A scene-based switcher modeled on OBS. Each scene now holds a list of
+// source "items" — a camera plus a position/size within the scene's
+// canvas, layered bottom-to-top by array order (like OBS's source
+// list). Preview shows whichever scene is selected and is also the
+// live editing surface: drag a source directly on it to move it, drag
+// its corner to resize. Program shows whatever's live, untouched by
+// editing.
 //
-// Known Phase 1 limitations, called out in the UI banner too:
+// Known Phase 2 limitations, called out in the UI banner too:
 //  - Video only. No audio bus yet (Phase 3) and no streaming out yet
 //    (Phase 4) — "Start Recording" captures the Program canvas to a
 //    single video-only file.
-//  - One source per scene, full-frame only. Layouts/PiP are Phase 2.
+//  - Resize is free-form (no aspect-ratio lock yet).
 //  - Cameras opened here are independent getUserMedia calls from Record
 //    Mode's — most cameras only allow one active consumer, so using the
 //    same physical camera in both modes at once may fail or hand the
@@ -27,9 +27,14 @@ const liveEl = {
   sceneList: document.getElementById('sceneList'),
   addSceneBtn: document.getElementById('addSceneBtn'),
   previewCanvas: document.getElementById('previewCanvas'),
+  previewOverlay: document.getElementById('previewOverlay'),
   programCanvas: document.getElementById('programCanvas'),
   cutBtn: document.getElementById('cutBtn'),
   fadeBtn: document.getElementById('fadeBtn'),
+
+  sceneItemsList: document.getElementById('sceneItemsList'),
+  sceneItemDeviceSelect: document.getElementById('sceneItemDeviceSelect'),
+  addSceneItemBtn: document.getElementById('addSceneItemBtn'),
 
   liveChooseFolderBtn: document.getElementById('liveChooseFolderBtn'),
   liveFolderLabel: document.getElementById('liveFolderLabel'),
@@ -42,7 +47,7 @@ const liveEl = {
 };
 
 const liveState = {
-  scenes: [],          // { id, name, deviceId, stream, videoEl, selectEl }
+  scenes: [],          // { id, name, items: [{id, deviceId, label, stream, videoEl, x, y, w, h}] }
   previewSceneId: null,
   programSceneId: null,
   transition: null,    // { fromId, toId, startedAt, duration } while a Fade is running
@@ -55,7 +60,7 @@ const liveState = {
 };
 
 let liveIdCounter = 0;
-const nextLiveId = () => `scene_${++liveIdCounter}`;
+const nextLiveId = (prefix) => `${prefix}_${++liveIdCounter}`;
 
 // ---------------------------------------------------------------------
 // Mode switching
@@ -72,48 +77,42 @@ function setMode(mode) {
   liveEl.modeLiveBtn.classList.toggle('active', goingLive);
 }
 
+function sceneById(id) {
+  return liveState.scenes.find((s) => s.id === id) || null;
+}
+
 // ---------------------------------------------------------------------
 // Scenes
 // ---------------------------------------------------------------------
 
-async function addScene() {
-  const scene = {
-    id: nextLiveId(),
-    name: `Scene ${liveState.scenes.length + 1}`,
-    deviceId: null,
-    stream: null,
-    videoEl: null
-  };
+function addScene() {
+  const scene = { id: nextLiveId('scene'), name: `Scene ${liveState.scenes.length + 1}`, items: [] };
   liveState.scenes.push(scene);
-  renderSceneList();
-  if (liveState.previewSceneId === null) {
-    liveState.previewSceneId = scene.id;
-    renderSceneList();
-  }
+  if (liveState.previewSceneId === null) liveState.previewSceneId = scene.id;
+  refreshLiveUI();
 }
 
 function removeScene(id) {
   const idx = liveState.scenes.findIndex((s) => s.id === id);
   if (idx === -1) return;
   const [scene] = liveState.scenes.splice(idx, 1);
-  if (scene.stream) scene.stream.getTracks().forEach((t) => t.stop());
-  if (scene.videoEl) scene.videoEl.remove();
-  if (liveState.previewSceneId === id) liveState.previewSceneId = null;
+  scene.items.forEach(teardownItem);
+  if (liveState.previewSceneId === id) liveState.previewSceneId = liveState.scenes[0]?.id || null;
   if (liveState.programSceneId === id) liveState.programSceneId = null;
-  renderSceneList();
+  refreshLiveUI();
 }
 
-async function assignSceneDevice(scene, deviceId) {
-  if (scene.stream) scene.stream.getTracks().forEach((t) => t.stop());
-  if (scene.videoEl) scene.videoEl.remove();
+function teardownItem(item) {
+  if (item.stream) item.stream.getTracks().forEach((t) => t.stop());
+  if (item.videoEl) item.videoEl.remove();
+}
 
-  if (!deviceId) {
-    scene.deviceId = null;
-    scene.stream = null;
-    scene.videoEl = null;
-    return;
-  }
+// ---------------------------------------------------------------------
+// Scene items (sources within a scene)
+// ---------------------------------------------------------------------
 
+async function addSceneItem(scene, deviceId, label) {
+  if (!deviceId) return;
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { deviceId: { exact: deviceId } },
@@ -126,28 +125,67 @@ async function assignSceneDevice(scene, deviceId) {
     video.srcObject = stream;
     liveEl.offscreenVideos.appendChild(video);
 
-    scene.deviceId = deviceId;
-    scene.stream = stream;
-    scene.videoEl = video;
+    // First source in a scene defaults to full-frame; later ones default
+    // to a staggered PiP box so they don't land exactly on top of each
+    // other and are easy to grab and reposition.
+    const n = scene.items.length;
+    const rect = n === 0
+      ? { x: 0, y: 0, w: 1, h: 1 }
+      : { x: 0.55 - 0.03 * n, y: 0.55 - 0.03 * n, w: 0.4, h: 0.4 };
+
+    scene.items.push({
+      id: nextLiveId('item'),
+      deviceId,
+      label,
+      stream,
+      videoEl: video,
+      ...rect
+    });
+    refreshLiveUI();
   } catch (err) {
-    alert(`Couldn't open that camera for this scene: ${err.message}`);
+    alert(`Couldn't open that camera: ${err.message}`);
   }
 }
 
-async function renderSceneList() {
-  liveEl.sceneList.innerHTML = '';
-  const devices = await navigator.mediaDevices.enumerateDevices();
-  const videoDevices = devices.filter((d) => d.kind === 'videoinput');
+function removeSceneItem(scene, itemId) {
+  const idx = scene.items.findIndex((i) => i.id === itemId);
+  if (idx === -1) return;
+  const [item] = scene.items.splice(idx, 1);
+  teardownItem(item);
+  refreshLiveUI();
+}
 
+function moveSceneItem(scene, itemId, direction) {
+  const idx = scene.items.findIndex((i) => i.id === itemId);
+  if (idx === -1) return;
+  const swapWith = direction === 'up' ? idx + 1 : idx - 1;
+  if (swapWith < 0 || swapWith >= scene.items.length) return;
+  [scene.items[idx], scene.items[swapWith]] = [scene.items[swapWith], scene.items[idx]];
+  refreshLiveUI();
+}
+
+// ---------------------------------------------------------------------
+// UI rendering
+// ---------------------------------------------------------------------
+
+function refreshLiveUI() {
+  renderSceneList();
+  renderSceneItemsPanel();
+  populateSceneItemDeviceSelect();
+  syncOverlay();
+}
+
+function renderSceneList() {
+  liveEl.sceneList.innerHTML = '';
   liveState.scenes.forEach((scene) => {
     const item = document.createElement('div');
     item.className = 'scene-item';
     if (scene.id === liveState.previewSceneId) item.classList.add('previewing');
     if (scene.id === liveState.programSceneId) item.classList.add('live');
     item.addEventListener('click', (e) => {
-      if (e.target.tagName === 'SELECT' || e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') return;
+      if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') return;
       liveState.previewSceneId = scene.id;
-      renderSceneList();
+      refreshLiveUI();
     });
 
     const nameInput = document.createElement('input');
@@ -157,26 +195,15 @@ async function renderSceneList() {
       scene.name = nameInput.value.trim() || scene.name;
     });
 
-    const select = document.createElement('select');
-    const noneOpt = document.createElement('option');
-    noneOpt.value = '';
-    noneOpt.textContent = 'No camera assigned';
-    select.appendChild(noneOpt);
-    videoDevices.forEach((d, i) => {
-      const opt = document.createElement('option');
-      opt.value = d.deviceId;
-      opt.textContent = d.label || `Camera ${i + 1}`;
-      if (d.deviceId === scene.deviceId) opt.selected = true;
-      select.appendChild(opt);
-    });
-    select.addEventListener('change', () => assignSceneDevice(scene, select.value));
-
     const footer = document.createElement('div');
     footer.className = 'scene-item-footer';
     const statusText = document.createElement('span');
-    statusText.textContent = scene.id === liveState.programSceneId
-      ? 'LIVE'
-      : scene.id === liveState.previewSceneId ? 'Preview' : '';
+    const parts = [];
+    if (scene.id === liveState.programSceneId) parts.push('LIVE');
+    else if (scene.id === liveState.previewSceneId) parts.push('Preview');
+    parts.push(`${scene.items.length} source${scene.items.length === 1 ? '' : 's'}`);
+    statusText.textContent = parts.join(' · ');
+
     const removeBtn = document.createElement('button');
     removeBtn.className = 'scene-remove';
     removeBtn.textContent = '✕';
@@ -184,40 +211,190 @@ async function renderSceneList() {
 
     footer.appendChild(statusText);
     footer.appendChild(removeBtn);
-
     item.appendChild(nameInput);
-    item.appendChild(select);
     item.appendChild(footer);
     liveEl.sceneList.appendChild(item);
   });
 }
 
-liveEl.addSceneBtn.addEventListener('click', addScene);
+function renderSceneItemsPanel() {
+  liveEl.sceneItemsList.innerHTML = '';
+  const scene = sceneById(liveState.previewSceneId);
+  if (!scene) return;
 
-// ---------------------------------------------------------------------
-// Canvas compositor — draws Preview and Program every frame, with a
-// "cover" fit (like CSS object-fit: cover) so sources of different
-// aspect ratios don't stretch.
-// ---------------------------------------------------------------------
+  // Render top-of-stack first so the list visually matches layering.
+  [...scene.items].reverse().forEach((sceneItem) => {
+    const row = document.createElement('div');
+    row.className = 'scene-item-row';
 
-function drawSceneCover(ctx, scene, w, h) {
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, w, h);
-  if (!scene || !scene.videoEl || scene.videoEl.readyState < 2) return;
-  const video = scene.videoEl;
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
-  if (!vw || !vh) return;
-  const scale = Math.max(w / vw, h / vh);
-  const dw = vw * scale;
-  const dh = vh * scale;
-  const dx = (w - dw) / 2;
-  const dy = (h - dh) / 2;
-  ctx.drawImage(video, dx, dy, dw, dh);
+    const label = document.createElement('span');
+    label.className = 'scene-item-row-label';
+    label.textContent = sceneItem.label;
+    row.appendChild(label);
+
+    const upBtn = document.createElement('button');
+    upBtn.textContent = '↑';
+    upBtn.title = 'Bring forward';
+    upBtn.addEventListener('click', () => moveSceneItem(scene, sceneItem.id, 'up'));
+
+    const downBtn = document.createElement('button');
+    downBtn.textContent = '↓';
+    downBtn.title = 'Send backward';
+    downBtn.addEventListener('click', () => moveSceneItem(scene, sceneItem.id, 'down'));
+
+    const removeBtn = document.createElement('button');
+    removeBtn.textContent = '✕';
+    removeBtn.title = 'Remove from scene';
+    removeBtn.addEventListener('click', () => removeSceneItem(scene, sceneItem.id));
+
+    row.appendChild(upBtn);
+    row.appendChild(downBtn);
+    row.appendChild(removeBtn);
+    liveEl.sceneItemsList.appendChild(row);
+  });
 }
 
-function sceneById(id) {
-  return liveState.scenes.find((s) => s.id === id) || null;
+async function populateSceneItemDeviceSelect() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const videoDevices = devices.filter((d) => d.kind === 'videoinput');
+  const prevValue = liveEl.sceneItemDeviceSelect.value;
+  liveEl.sceneItemDeviceSelect.innerHTML = '';
+  videoDevices.forEach((d, i) => {
+    const opt = document.createElement('option');
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `Camera ${i + 1}`;
+    liveEl.sceneItemDeviceSelect.appendChild(opt);
+  });
+  if (prevValue) liveEl.sceneItemDeviceSelect.value = prevValue;
+}
+
+liveEl.addSceneBtn.addEventListener('click', addScene);
+liveEl.addSceneItemBtn.addEventListener('click', () => {
+  const scene = sceneById(liveState.previewSceneId);
+  if (!scene) {
+    alert('Select or add a scene first.');
+    return;
+  }
+  const select = liveEl.sceneItemDeviceSelect;
+  const deviceId = select.value;
+  const label = select.options[select.selectedIndex]?.textContent || 'Camera';
+  addSceneItem(scene, deviceId, label);
+});
+
+// ---------------------------------------------------------------------
+// Drag-to-arrange overlay on the Preview monitor
+// ---------------------------------------------------------------------
+
+function syncOverlay() {
+  liveEl.previewOverlay.innerHTML = '';
+  const scene = sceneById(liveState.previewSceneId);
+  if (!scene) return;
+
+  scene.items.forEach((sceneItem) => {
+    const box = document.createElement('div');
+    box.className = 'source-box';
+    positionBoxEl(box, sceneItem);
+
+    const label = document.createElement('div');
+    label.className = 'source-box-label';
+    label.textContent = sceneItem.label;
+    box.appendChild(label);
+
+    const handle = document.createElement('div');
+    handle.className = 'resize-handle';
+    box.appendChild(handle);
+
+    box.addEventListener('pointerdown', (e) => {
+      if (e.target === handle) return;
+      startDrag(e, sceneItem, box, 'move');
+    });
+    handle.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
+      startDrag(e, sceneItem, box, 'resize');
+    });
+
+    liveEl.previewOverlay.appendChild(box);
+  });
+}
+
+function positionBoxEl(box, sceneItem) {
+  box.style.left = `${sceneItem.x * 100}%`;
+  box.style.top = `${sceneItem.y * 100}%`;
+  box.style.width = `${sceneItem.w * 100}%`;
+  box.style.height = `${sceneItem.h * 100}%`;
+}
+
+function startDrag(e, sceneItem, box, mode) {
+  e.preventDefault();
+  const canvasRect = liveEl.previewCanvas.getBoundingClientRect();
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const orig = { x: sceneItem.x, y: sceneItem.y, w: sceneItem.w, h: sceneItem.h };
+  const MIN = 0.05;
+
+  function onMove(ev) {
+    const dxFrac = (ev.clientX - startX) / canvasRect.width;
+    const dyFrac = (ev.clientY - startY) / canvasRect.height;
+
+    if (mode === 'move') {
+      sceneItem.x = clamp(orig.x + dxFrac, 0, 1 - sceneItem.w);
+      sceneItem.y = clamp(orig.y + dyFrac, 0, 1 - sceneItem.h);
+    } else {
+      sceneItem.w = clamp(orig.w + dxFrac, MIN, 1 - sceneItem.x);
+      sceneItem.h = clamp(orig.h + dyFrac, MIN, 1 - sceneItem.y);
+    }
+    positionBoxEl(box, sceneItem);
+  }
+
+  function onUp() {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+  }
+
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+// ---------------------------------------------------------------------
+// Canvas compositor — draws every item in a scene, bottom-to-top, with
+// a "cover" fit within its own box so a source doesn't stretch when its
+// box has a different aspect ratio than the camera.
+// ---------------------------------------------------------------------
+
+function drawItemCover(ctx, item, canvasW, canvasH) {
+  if (!item.videoEl || item.videoEl.readyState < 2) return;
+  const vw = item.videoEl.videoWidth;
+  const vh = item.videoEl.videoHeight;
+  if (!vw || !vh) return;
+
+  const boxX = item.x * canvasW;
+  const boxY = item.y * canvasH;
+  const boxW = item.w * canvasW;
+  const boxH = item.h * canvasH;
+
+  const scale = Math.max(boxW / vw, boxH / vh);
+  const dw = vw * scale;
+  const dh = vh * scale;
+  const dx = boxX + (boxW - dw) / 2;
+  const dy = boxY + (boxH - dh) / 2;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(boxX, boxY, boxW, boxH);
+  ctx.clip();
+  ctx.drawImage(item.videoEl, dx, dy, dw, dh);
+  ctx.restore();
+}
+
+function drawSceneComposite(ctx, scene, w, h) {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, w, h);
+  if (!scene) return;
+  scene.items.forEach((item) => drawItemCover(ctx, item, w, h));
 }
 
 function renderLoop() {
@@ -226,18 +403,16 @@ function renderLoop() {
   const w = liveEl.programCanvas.width;
   const h = liveEl.programCanvas.height;
 
-  drawSceneCover(pvwCtx, sceneById(liveState.previewSceneId), w, h);
+  drawSceneComposite(pvwCtx, sceneById(liveState.previewSceneId), w, h);
 
   if (liveState.transition) {
     const { fromId, toId, startedAt, duration } = liveState.transition;
     const t = Math.min(1, (performance.now() - startedAt) / duration);
 
-    // Draw the outgoing scene, then the incoming scene on top at
-    // rising opacity — a straightforward crossfade.
-    drawSceneCover(pgmCtx, sceneById(fromId), w, h);
+    drawSceneComposite(pgmCtx, sceneById(fromId), w, h);
     pgmCtx.save();
     pgmCtx.globalAlpha = t;
-    drawSceneCover(pgmCtx, sceneById(toId), w, h);
+    drawSceneComposite(pgmCtx, sceneById(toId), w, h);
     pgmCtx.restore();
 
     if (t >= 1) {
@@ -246,7 +421,7 @@ function renderLoop() {
       renderSceneList();
     }
   } else {
-    drawSceneCover(pgmCtx, sceneById(liveState.programSceneId), w, h);
+    drawSceneComposite(pgmCtx, sceneById(liveState.programSceneId), w, h);
   }
 
   requestAnimationFrame(renderLoop);
@@ -263,7 +438,7 @@ liveEl.cutBtn.addEventListener('click', () => {
   liveState.programSceneId = liveState.previewSceneId;
   liveState.previewSceneId = prevProgram;
   liveState.transition = null;
-  renderSceneList();
+  refreshLiveUI();
 });
 
 liveEl.fadeBtn.addEventListener('click', () => {
@@ -272,7 +447,7 @@ liveEl.fadeBtn.addEventListener('click', () => {
   const fromId = liveState.programSceneId;
   liveState.previewSceneId = fromId; // old program becomes the new preview once the fade lands
   liveState.transition = { fromId, toId, startedAt: performance.now(), duration: 500 };
-  renderSceneList();
+  refreshLiveUI();
 });
 
 // ---------------------------------------------------------------------
@@ -351,3 +526,6 @@ function startLiveTimer() {
 function stopLiveTimer() {
   clearInterval(liveState.timerInterval);
 }
+
+populateSceneItemDeviceSelect();
+navigator.mediaDevices.addEventListener('devicechange', populateSceneItemDeviceSelect);
