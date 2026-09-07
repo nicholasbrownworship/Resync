@@ -56,6 +56,7 @@ const liveEl = {
   sceneItemsList: document.getElementById('sceneItemsList'),
   sceneItemDeviceSelect: document.getElementById('sceneItemDeviceSelect'),
   addSceneItemBtn: document.getElementById('addSceneItemBtn'),
+  addDiceOverlayBtn: document.getElementById('addDiceOverlayBtn'),
 
   liveChooseFolderBtn: document.getElementById('liveChooseFolderBtn'),
   liveFolderLabel: document.getElementById('liveFolderLabel'),
@@ -73,6 +74,8 @@ const liveState = {
   programSceneId: null,  // which scene is "live", for labeling only
   programItems: [],      // the pushed arrangement Program actually renders
   connections: new Map(), // connId -> { deviceId, label, stream, videoEl, resolutionPreset }
+  overlays: new Map(),   // overlayId -> { dieLabel, value, modifier } — dice overlay sources, keyed like connections
+                          // so a scene item's connId can point at either map depending on item.kind
   transition: null,      // { fromItems, toItems, toSceneId, startedAt, duration } while a Fade is running
   baseDir: null,
   recording: false,
@@ -139,11 +142,22 @@ function teardownConnection(connId) {
   liveState.connections.delete(connId);
 }
 
-// Tears down any connection nothing references anymore — not an
-// editable scene, not Program's pushed arrangement, not an in-flight
-// transition. This is what lets Program keep playing a connection
-// live even after you've edited or removed it from the scene it
-// originally came from.
+// Dice overlay sources follow the same "shared object keyed by id,
+// scene item just points at it" model as camera connections (see file
+// header). That's what lets a live roll update show up on Program
+// immediately without needing a Cut/Fade — Program's cloned item still
+// points at the same overlay object, not a snapshot of its value.
+function createOverlay() {
+  const overlayId = nextLiveId('overlay');
+  liveState.overlays.set(overlayId, { dieLabel: 'd20', value: null, modifier: 0 });
+  return overlayId;
+}
+
+// Tears down any connection or overlay nothing references anymore —
+// not an editable scene, not Program's pushed arrangement, not an
+// in-flight transition. This is what lets Program keep playing a
+// connection (or a live overlay value) even after you've edited or
+// removed it from the scene it originally came from.
 function gcConnections() {
   const used = new Set();
   liveState.scenes.forEach((scene) => scene.items.forEach((item) => used.add(item.connId)));
@@ -154,6 +168,9 @@ function gcConnections() {
   }
   for (const connId of [...liveState.connections.keys()]) {
     if (!used.has(connId)) teardownConnection(connId);
+  }
+  for (const overlayId of [...liveState.overlays.keys()]) {
+    if (!used.has(overlayId)) liveState.overlays.delete(overlayId);
   }
 }
 
@@ -194,6 +211,16 @@ async function addSceneItem(scene, deviceId, label) {
   } catch (err) {
     alert(`Couldn't open that camera: ${err.message}`);
   }
+}
+
+function addDiceOverlayItem(scene) {
+  const overlayId = createOverlay();
+  const n = scene.items.length;
+  const rect = n === 0
+    ? { x: 0, y: 0, w: 1, h: 1 }
+    : { x: 0.55 - 0.03 * n, y: 0.55 - 0.03 * n, w: 0.4, h: 0.4 };
+  scene.items.push({ id: nextLiveId('item'), kind: 'diceOverlay', connId: overlayId, ...rect });
+  refreshLiveUI();
 }
 
 function removeSceneItem(scene, itemId) {
@@ -294,13 +321,17 @@ function renderSceneItemsPanel() {
 
   // Render top-of-stack first so the list visually matches layering.
   [...scene.items].reverse().forEach((sceneItem) => {
-    const conn = liveState.connections.get(sceneItem.connId);
+    const isOverlay = sceneItem.kind === 'diceOverlay';
+    const conn = isOverlay ? null : liveState.connections.get(sceneItem.connId);
+    const overlay = isOverlay ? liveState.overlays.get(sceneItem.connId) : null;
     const row = document.createElement('div');
     row.className = 'scene-item-row';
 
     const label = document.createElement('span');
     label.className = 'scene-item-row-label';
-    label.textContent = conn ? conn.label : '(disconnected)';
+    label.textContent = isOverlay
+      ? (overlay ? `Dice overlay (${overlay.dieLabel})` : '(disconnected)')
+      : (conn ? conn.label : '(disconnected)');
     row.appendChild(label);
 
     const settingsBtn = document.createElement('button');
@@ -332,10 +363,105 @@ function renderSceneItemsPanel() {
     row.appendChild(removeBtn);
     liveEl.sceneItemsList.appendChild(row);
 
-    if (expandedSettingsItemId === sceneItem.id && conn) {
-      liveEl.sceneItemsList.appendChild(buildItemSettingsPanel(sceneItem, conn));
+    if (expandedSettingsItemId === sceneItem.id) {
+      if (isOverlay && overlay) {
+        liveEl.sceneItemsList.appendChild(buildDiceOverlaySettingsPanel(overlay));
+      } else if (conn) {
+        liveEl.sceneItemsList.appendChild(buildItemSettingsPanel(sceneItem, conn));
+      }
     }
   });
+}
+
+// Manual roll entry + the "+1/+2/+5..." modifier switch, per the design
+// discussion — camera-vision auto-read isn't wired in yet, so this is
+// how the DM tells the overlay what the die actually showed. Mutates
+// the shared overlay object directly so Preview AND Program (if this
+// overlay is currently pushed live) update on the very next frame,
+// with no Cut/Fade needed.
+function buildDiceOverlaySettingsPanel(overlay) {
+  const panel = document.createElement('div');
+  panel.className = 'quality-controls item-settings-panel';
+
+  const dieRow = document.createElement('div');
+  dieRow.className = 'quality-row';
+  const dieLabelEl = document.createElement('label');
+  dieLabelEl.textContent = 'Die';
+  const dieSelect = document.createElement('select');
+  ['d4', 'd6', 'd8', 'd10', 'd12', 'd20'].forEach((d) => {
+    const opt = document.createElement('option');
+    opt.value = d;
+    opt.textContent = d;
+    if (d === overlay.dieLabel) opt.selected = true;
+    dieSelect.appendChild(opt);
+  });
+  dieSelect.addEventListener('change', () => {
+    overlay.dieLabel = dieSelect.value;
+    renderSceneItemsPanel(); // refreshes the row label above too
+  });
+  dieRow.appendChild(dieLabelEl);
+  dieRow.appendChild(dieSelect);
+
+  const valueRow = document.createElement('div');
+  valueRow.className = 'quality-row';
+  const valueLabel = document.createElement('label');
+  valueLabel.textContent = 'Rolled';
+  const valueInput = document.createElement('input');
+  valueInput.type = 'number';
+  valueInput.placeholder = '—';
+  if (overlay.value !== null) valueInput.value = overlay.value;
+  valueInput.addEventListener('input', () => {
+    const n = parseInt(valueInput.value, 10);
+    overlay.value = Number.isNaN(n) ? null : n;
+  });
+  valueRow.appendChild(valueLabel);
+  valueRow.appendChild(valueInput);
+
+  const modPresets = [-5, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 10];
+  const modRow = document.createElement('div');
+  modRow.className = 'quality-row';
+  const modLabel = document.createElement('label');
+  modLabel.textContent = 'Modifier';
+  const modSelect = document.createElement('select');
+  modPresets.forEach((m) => {
+    const opt = document.createElement('option');
+    opt.value = String(m);
+    opt.textContent = m >= 0 ? `+${m}` : `${m}`;
+    if (m === overlay.modifier) opt.selected = true;
+    modSelect.appendChild(opt);
+  });
+  modSelect.addEventListener('change', () => {
+    overlay.modifier = parseInt(modSelect.value, 10);
+  });
+  modRow.appendChild(modLabel);
+  modRow.appendChild(modSelect);
+
+  const customModRow = document.createElement('div');
+  customModRow.className = 'quality-row';
+  const customModLabel = document.createElement('label');
+  customModLabel.textContent = 'Custom mod';
+  const customModInput = document.createElement('input');
+  customModInput.type = 'number';
+  customModInput.placeholder = 'e.g. 13';
+  customModInput.addEventListener('change', () => {
+    const n = parseInt(customModInput.value, 10);
+    if (Number.isNaN(n)) return;
+    overlay.modifier = n;
+    modSelect.value = modPresets.includes(n) ? String(n) : modSelect.value;
+  });
+  customModRow.appendChild(customModLabel);
+  customModRow.appendChild(customModInput);
+
+  const note = document.createElement('div');
+  note.className = 'quality-actual';
+  note.textContent = 'Manual entry for now — camera auto-read comes later.';
+
+  panel.appendChild(dieRow);
+  panel.appendChild(valueRow);
+  panel.appendChild(modRow);
+  panel.appendChild(customModRow);
+  panel.appendChild(note);
+  return panel;
 }
 
 function buildItemSettingsPanel(sceneItem, conn) {
@@ -400,6 +526,15 @@ liveEl.addSceneItemBtn.addEventListener('click', () => {
   addSceneItem(scene, deviceId, label);
 });
 
+liveEl.addDiceOverlayBtn.addEventListener('click', () => {
+  const scene = sceneById(liveState.previewSceneId);
+  if (!scene) {
+    alert('Select or add a scene first.');
+    return;
+  }
+  addDiceOverlayItem(scene);
+});
+
 // ---------------------------------------------------------------------
 // Drag-to-arrange overlay on the Preview monitor
 // ---------------------------------------------------------------------
@@ -410,14 +545,18 @@ function syncOverlay() {
   if (!scene) return;
 
   scene.items.forEach((sceneItem) => {
-    const conn = liveState.connections.get(sceneItem.connId);
+    const isOverlay = sceneItem.kind === 'diceOverlay';
+    const conn = isOverlay ? null : liveState.connections.get(sceneItem.connId);
+    const overlay = isOverlay ? liveState.overlays.get(sceneItem.connId) : null;
     const box = document.createElement('div');
     box.className = 'source-box';
     positionBoxEl(box, sceneItem);
 
     const label = document.createElement('div');
     label.className = 'source-box-label';
-    label.textContent = conn ? conn.label : '(disconnected)';
+    label.textContent = isOverlay
+      ? (overlay ? `Dice overlay (${overlay.dieLabel})` : '(disconnected)')
+      : (conn ? conn.label : '(disconnected)');
     box.appendChild(label);
 
     const handle = document.createElement('div');
@@ -486,6 +625,12 @@ function clamp(v, min, max) {
 // ---------------------------------------------------------------------
 
 function drawItemCover(ctx, item, canvasW, canvasH) {
+  if (item.kind === 'diceOverlay') {
+    const overlay = liveState.overlays.get(item.connId);
+    if (overlay) drawDiceOverlay(ctx, item, overlay, canvasW, canvasH);
+    return;
+  }
+
   const conn = liveState.connections.get(item.connId);
   if (!conn || !conn.videoEl || conn.videoEl.readyState < 2) return;
   const vw = conn.videoEl.videoWidth;
@@ -508,6 +653,51 @@ function drawItemCover(ctx, item, canvasW, canvasH) {
   ctx.rect(boxX, boxY, boxW, boxH);
   ctx.clip();
   ctx.drawImage(conn.videoEl, dx, dy, dw, dh);
+  ctx.restore();
+}
+
+// Draws the die label, the total (rolled + modifier), and a breakdown
+// line — reads straight from the shared overlay object each frame, so
+// typing a new roll into the settings panel shows up immediately here
+// with no extra plumbing.
+function drawDiceOverlay(ctx, item, overlay, canvasW, canvasH) {
+  const boxX = item.x * canvasW;
+  const boxY = item.y * canvasH;
+  const boxW = item.w * canvasW;
+  const boxH = item.h * canvasH;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(boxX, boxY, boxW, boxH);
+  ctx.clip();
+
+  ctx.fillStyle = 'rgba(10, 12, 16, 0.55)';
+  ctx.fillRect(boxX, boxY, boxW, boxH);
+
+  const hasValue = typeof overlay.value === 'number' && !Number.isNaN(overlay.value);
+  const mod = overlay.modifier || 0;
+  const total = hasValue ? overlay.value + mod : null;
+
+  const cx = boxX + boxW / 2;
+  const cy = boxY + boxH / 2;
+  const baseSize = Math.max(18, Math.min(boxW, boxH) * 0.28);
+
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.font = `500 ${Math.round(baseSize * 0.5)}px sans-serif`;
+  ctx.fillText(overlay.dieLabel || 'd20', cx, cy - baseSize * 0.7);
+
+  ctx.font = `700 ${Math.round(baseSize)}px sans-serif`;
+  ctx.fillText(hasValue ? String(total) : '—', cx, cy);
+
+  if (hasValue) {
+    ctx.font = `400 ${Math.round(baseSize * 0.4)}px sans-serif`;
+    const breakdown = mod === 0 ? `rolled ${overlay.value}` : `${overlay.value} ${mod > 0 ? '+' : '-'} ${Math.abs(mod)}`;
+    ctx.fillText(breakdown, cx, cy + baseSize * 0.75);
+  }
+
   ctx.restore();
 }
 
