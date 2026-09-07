@@ -535,7 +535,8 @@ select {
   color: var(--text-dim);
   white-space: nowrap;
 }
-.quality-row select {
+.quality-row select,
+.quality-row input[type="number"] {
   font-size: 12px;
   padding: 3px 6px;
   flex: 1;
